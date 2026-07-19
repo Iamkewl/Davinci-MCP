@@ -1,0 +1,102 @@
+# ----- Python -----
+# Bytecode / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+site/
+.Python
+*.spec
+# pip / tox / coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+# pyenv
+.python-version
+
+# ----- uv (workspace + per-package venvs) -----
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+# uv cache (in case anyone runs `uv cache` outside the venv)
+.python-libraries/
+
+# ----- Test / type / lint caches -----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+.mutmut-cache/
+.coverage
+
+# ----- Editor / IDE -----
+.vscode/
+.vscode-test/
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.swp
+*~
+.fleet/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+*~
+.history/
+
+# ----- OS noise -----
+.directory
+*.sw[a-p]
+*.s[a-v][a-z]
+*.un~
+Session.vim
+.netrwhist
+*~
+ehthumbs.db
+$RECYCLE.BIN/
+
+# ----- Resolve / Project artifacts -----
+# Director run store (created on demand at runtime; ignored globally)
+runs/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.jsonl
+# Local env files (never commit secrets)
+.env
+.env.*
+!.env.example
+!.env.e2e.example
+# macOS-specific
+.DocumentRevisions-V100
+.fseventsd
+._*
+
+# ----- Logs -----
+*.log
+logs/
+
+# ----- Temporary / scratch -----
+tmp/
+tmp.*
+*.tmp
+.cache/
+.benchmarks/
+
+# ----- Test fixtures / local data -----
+# (None currently; add specific large asset paths here later if the project grows.)

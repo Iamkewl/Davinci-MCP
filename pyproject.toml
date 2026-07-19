@@ -1,0 +1,60 @@
+[project]
+name = "davinci-mcp"
+version = "0.1.0"
+description = "Monorepo: resolve-mcp (MCP server for DaVinci Resolve) + director (MCP client orchestrator)."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["packages/resolve-mcp", "packages/director"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<1",
+    "ruff>=0.7,<1",
+    "mypy>=1.13,<2",
+    "types-PyYAML",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402"]
+"packages/director/src/director/cli.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["build", ".venv"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "director.mcp_client.*",
+    "director.ingestion.gemini_client",
+    "director.cli",
+]
+disallow_untyped_defs = false
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["packages/resolve-mcp/tests", "packages/director/tests"]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"

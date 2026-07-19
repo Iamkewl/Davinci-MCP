@@ -1,0 +1,25 @@
+[project]
+name = "director"
+version = "0.1.0"
+description = "MCP-client orchestrator: Contextualizer -> Planner <-> Director -> Editor. Gemini + librosa."
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=0.3,<1",
+    "librosa>=0.10,<1",
+    "soundfile>=0.12,<1",
+    "numpy>=2.0,<3",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "structlog>=24.4,<25",
+    "typer>=0.12,<1",
+]
+
+[project.scripts]
+director = "director.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/director"]
