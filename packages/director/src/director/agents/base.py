@@ -15,13 +15,16 @@ file under :mod:`director.agents`.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import ValidationError
 
 from ..ingestion.gemini_client import GeminiClient
 from ..settings import DirectorSettings
 from .logging_setup import get_logger
+
+if TYPE_CHECKING:
+    from ..llm.base import LLMClient
 
 logger = get_logger("director.agents")
 
@@ -31,12 +34,19 @@ OutputT = TypeVar("OutputT")
 class Agent(ABC, Generic[OutputT]):
     """Common base for all orchestrator agents.
 
-    Concrete subclasses implement :meth:`run`. They receive a Gemini client and
-    the director settings so the same base works in production and tests.
+    Concrete subclasses implement :meth:`run`. They receive a provider-agnostic
+    LLM client (``llm=``) and the director settings so the same base works in
+    production and tests. ``gemini=`` remains accepted as a legacy alias.
     """
 
-    def __init__(self, *, gemini: GeminiClient | None, settings: DirectorSettings) -> None:
-        self._gemini = gemini
+    def __init__(
+        self,
+        *,
+        settings: DirectorSettings,
+        gemini: GeminiClient | None = None,
+        llm: LLMClient | None = None,
+    ) -> None:
+        self._llm = llm if llm is not None else gemini
         self._settings = settings
 
     @property
@@ -44,8 +54,14 @@ class Agent(ABC, Generic[OutputT]):
         return self._settings
 
     @property
-    def gemini(self) -> GeminiClient | None:
-        return self._gemini
+    def llm(self) -> Any:
+        """The configured LLM client, or None in offline mode."""
+        return self._llm
+
+    @property
+    def gemini(self) -> Any:
+        """Legacy alias for :attr:`llm`."""
+        return self._llm
 
     @abstractmethod
     async def run(self, *args: Any, **kwargs: Any) -> OutputT:  # pragma: no cover

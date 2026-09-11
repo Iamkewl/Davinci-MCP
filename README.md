@@ -121,6 +121,21 @@ uv run director auto ./clips -m ./music.mp3 -p "moody cinematic edit" \
 | `--uv-project` | Path to `resolve-mcp` so director can launch the server |
 | `--fast` | Skip Gemini; deterministic planner/director |
 
+### Choosing a model provider
+
+The planner/reviewer/vision stack is provider-agnostic. Default is Gemini; any OpenAI-compatible endpoint (OpenRouter, vLLM, …) works too:
+
+```bash
+# .env
+DIRECTOR_LLM_PROVIDER=openai_compatible
+DIRECTOR_LLM_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=sk-or-...
+DIRECTOR_REASONING_MODEL=anthropic/claude-sonnet-4.6
+DIRECTOR_VISION_MODEL=google/gemini-3-flash
+```
+
+Per-run override: `--llm {gemini,openai_compatible,none}`. `--fast` always runs fully offline.
+
 ### Interactive mode — refine conversationally
 
 ```bash
@@ -129,11 +144,12 @@ uv run director interactive --fast
 uv run director interactive --backend davinci --uv-project packages/resolve-mcp
 ```
 
-### Inspect your runs
+### Inspect and resume runs
 
 ```bash
 uv run director run list           # every run in the store
 uv run director run show <run_id>  # record, verdicts, and every tool call
+uv run director resume <run_id>    # re-execute the last agreed plan (rebuild the cut)
 ```
 
 ### Use `resolve-mcp` from any MCP client

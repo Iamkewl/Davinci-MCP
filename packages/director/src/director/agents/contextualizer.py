@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -12,6 +13,9 @@ from ..ingestion.gemini_client import GeminiClient, GeminiError
 from ..schemas import PerClipMap
 from ..settings import DirectorSettings
 from .base import Agent, raise_or_rethrow_validation
+
+if TYPE_CHECKING:
+    from ..llm.base import LLMClient
 
 
 @dataclass
@@ -28,10 +32,11 @@ class Contextualizer(Agent[ContextResult]):
     def __init__(
         self,
         *,
-        gemini: GeminiClient | None,
+        gemini: GeminiClient | None = None,
+        llm: LLMClient | None = None,
         settings: DirectorSettings,
     ) -> None:
-        super().__init__(gemini=gemini, settings=settings)
+        super().__init__(gemini=gemini, llm=llm, settings=settings)
 
     async def run(
         self,
@@ -54,14 +59,14 @@ class Contextualizer(Agent[ContextResult]):
         return ContextResult(per_clip=per_clip, music_analysis=music_analysis)
 
     async def _analyze_clip(self, clip_id: str, path: str) -> PerClipMap:
-        if self._gemini is None:
+        if self._llm is None:
             # Without a Gemini client we cannot do vision analysis. Return a
             # placeholder map carrying only the path. Tests inject a fake gemini
             # for full coverage.
             return PerClipMap(clip_id=clip_id, source_path=path, duration_seconds=0.0)
 
         try:
-            pcm = await self._gemini.analyze_video(
+            pcm = await self._llm.analyze_video(
                 clip_path=path,
                 clip_id=clip_id,
                 prompt=(

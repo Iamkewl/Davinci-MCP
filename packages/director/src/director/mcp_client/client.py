@@ -13,6 +13,7 @@ For tests we substitute :class:`StubResolveClient` which talks directly to a
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
@@ -21,6 +22,24 @@ from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+def _build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Full parent environment (+overrides) for the spawned server subprocess.
+
+    The MCP SDK's default (``env=None``) passes a minimal scrubbed environment,
+    which drops vars like ``UV_PROJECT_ENVIRONMENT`` and breaks ``uv run``
+    children (they would build a fresh .venv, potentially on a slow mount).
+    """
+    return {**os.environ, **(extra or {})}
+
+
+class ToolCallError(Exception):
+    """Tool call returned isError=True at the MCP protocol level."""
+
+    def __init__(self, name: str, message: str) -> None:
+        super().__init__(f"tool {name!r} failed: {message}")
+        self.tool_name = name
 
 
 class ResolveClient(ABC):
@@ -90,7 +109,7 @@ class StdioResolveClient(ResolveClient):
         params = StdioServerParameters(
             command=self.server_command[0],
             args=self.server_command[1:],
-            env=self.server_env,
+            env=_build_child_env(self.server_env),
         )
         self._cm = stdio_client(params)
         read, write = await self._cm.__aenter__()
@@ -112,6 +131,16 @@ class StdioResolveClient(ResolveClient):
             msg = "StdioResolveClient.start() was not awaited"
             raise RuntimeError(msg)
         result = await self._session.call_tool(name=name, arguments=arguments)
+        # Honour the protocol-level error flag: a transport-OK call whose
+        # result carries isError=True is a tool failure, not a payload.
+        if getattr(result, "isError", False):
+            chunks: list[str] = []
+            for part in result.content or []:
+                text = getattr(part, "text", None)
+                if text:
+                    chunks.append(text)
+            detail = "\n".join(chunks) or "<no error text>"
+            raise ToolCallError(name=name, message=detail)
         # The SDK returns a CallToolResult containing a `content` list of TextContent
         # and optional `structuredContent`.
         if getattr(result, "structuredContent", None):
@@ -185,14 +214,7 @@ class StubResolveClient(ResolveClient):
         raise KeyError(msg)
 
     async def list_tools(self) -> list[str]:
-        return [
-            "create_project",
-            "import_media",
-            "list_media_pool",
-            "create_timeline",
-            "append_clip",
-            "get_timeline_state",
-        ]
+        return sorted(_fake_dispatch_table(self.backend))
 
     async def close(self) -> None:  # nothing to do; backend lives in memory
         return None
@@ -205,6 +227,21 @@ async def _call_fake_tool(be: Any, name: str, args: dict[str, Any]) -> dict[str,
     """Replays the resolve-mcp tool layer against a FakeResolveBackend WITHOUT
     needing the FastMCP server in the test process. We use the pure-Python
     functions in :mod:`resolve_mcp.tools` so behavior matches a real server.
+    """
+    table = _fake_dispatch_table(be)
+    try:
+        fn = table[name]
+    except KeyError as exc:
+        raise KeyError(f"unknown tool: {name}") from exc
+    result: dict[str, Any] = fn(args)
+    return result
+
+
+def _fake_dispatch_table(be: Any) -> dict[str, Any]:
+    """Map of tool name -> bound tool call against the fake backend.
+
+    Shared by ``_call_fake_tool`` and ``StubResolveClient.list_tools`` so both
+    agree on the registered set (mirrors ``resolve_mcp.server``).
     """
     from resolve_mcp.tools import (
         add_fade,
@@ -253,7 +290,7 @@ async def _call_fake_tool(be: Any, name: str, args: dict[str, Any]) -> dict[str,
         "append_clip": lambda a: append_clip(
             be,
             media_clip_id=a["media_clip_id"],
-            timeline_track_index=a.get("timeline_track_index", 0),
+            timeline_track_index=a.get("timeline_track_index", 1),
             start_seconds=a.get("start_seconds", 0.0),
             duration_seconds=a["duration_seconds"],
             source_in_seconds=a.get("source_in_seconds", 0.0),
@@ -306,17 +343,14 @@ async def _call_fake_tool(be: Any, name: str, args: dict[str, Any]) -> dict[str,
         "delete_timeline": lambda a: delete_timeline(be, name=a["name"], confirm=a["confirm"]),
         "delete_media": lambda a: delete_media(be, media_clip_id=a["media_clip_id"], confirm=a["confirm"]),
     }
-    try:
-        fn = table[name]
-    except KeyError as exc:
-        raise KeyError(f"unknown tool: {name}") from exc
-    return fn(args)
+    return table
 
 
 __all__ = [
     "ResolveClient",
     "StdioResolveClient",
     "StubResolveClient",
+    "ToolCallError",
 ]
 
 

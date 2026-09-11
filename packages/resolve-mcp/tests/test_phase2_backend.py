@@ -38,7 +38,7 @@ def with_item() -> tuple[FakeResolveBackend, str]:
     be.import_media(["/tmp/a.mp4"])
     be.create_timeline("main", 24.0)
     media = be.list_media_pool().clips[0].id
-    be.append_clip(media, 0, 0.0, 4.0)
+    be.append_clip(media, 1, 0.0, 4.0)
     item_id = be.get_timeline_state().tracks[0].items[0].id
     return be, item_id
 
@@ -135,7 +135,7 @@ def test_add_transition_attaches_to_item(with_item: tuple[FakeResolveBackend, st
     be, item_id = with_item
     be.add_transition(
         timeline_item_id=item_id,
-        track_index=0,
+        track_index=1,
         style=TransitionStyle.CROSS_DISSOLVE,
         duration_seconds=1.0,
         alignment=TransitionAlignment.MID,

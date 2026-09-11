@@ -6,15 +6,22 @@ starts at iteration 0 and a resumed run picks up at the next iteration.
 
 Termination is honest:
 
-* APPROVED → status = completed_approved
-* ACCEPTED_WITH_WARNINGS → status = completed_with_warnings
-* If we hit max_planner_iterations without APPROVED → status = failed and we
-  surface the latest verdict.
+* APPROVED → the plan executes exactly once via the Editor:
+    - no op errors → status = completed_approved
+    - errors present but at least one tool call succeeded →
+      status = completed_with_warnings (errors surface via ``AutoResult``)
+    - every executed tool call failed → status = failed
+* ACCEPTED_WITH_WARNINGS → the plan is never executed; we keep iterating so
+  the planner can act on the warnings. If the budget runs out on warnings,
+  status = completed_with_warnings.
+* Director FAILED / invalid planner output / budget exhausted without any
+  verdict → status = failed and we surface the latest verdict.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .agents import (
     Contextualizer,
@@ -39,6 +46,9 @@ from .schemas import (
 from .settings import DirectorSettings
 from .store import EventLog, RunStore
 
+if TYPE_CHECKING:
+    from .llm.base import LLMClient
+
 
 @dataclass
 class AutoResult:
@@ -57,19 +67,20 @@ class Orchestrator:
         self,
         *,
         settings: DirectorSettings,
-        gemini: GeminiClient | None,
+        gemini: GeminiClient | None = None,
+        llm: LLMClient | None = None,
         client: ResolveClient,
         run_store: RunStore,
         event_log: EventLog,
     ) -> None:
         self._settings = settings
-        self._gemini = gemini
+        self._llm = llm if llm is not None else gemini
         self._client = client
         self._run_store = run_store
         self._event_log = event_log
-        self._contextualizer = Contextualizer(gemini=gemini, settings=settings)
-        self._planner = Planner(gemini=gemini, settings=settings)
-        self._director = Director(gemini=gemini, settings=settings)
+        self._contextualizer = Contextualizer(llm=self._llm, settings=settings)
+        self._planner = Planner(llm=self._llm, settings=settings)
+        self._director = Director(llm=self._llm, settings=settings)
         self._editor = Editor(
             gemini=None,  # editor doesn't call Gemini
             settings=settings,
@@ -113,8 +124,9 @@ class Orchestrator:
             )
         )
 
-        # 1. Contextualize
+        # 1. Contextualize (snapshot persisted so resume_run can re-execute later)
         ctx = await self._contextualizer.run(clip_paths, music_path)
+        self._run_store.save_context(record.run_id, ctx.per_clip)
         music_bpm = ctx.music_analysis.bpm if ctx.music_analysis else None
         beats = (
             ctx.music_analysis.beat_times.tolist() if ctx.music_analysis else []
@@ -172,30 +184,24 @@ class Orchestrator:
             self._run_store.update_run(record_dict)
             if verdict.verdict == DirectorVerdict.APPROVED:
                 last_plan = plan
-                # 3. Execute plan via Editor
+                # Execute exactly once, and only on APPROVED.
                 edit_result = await self._editor.run(
                     run_id=record.run_id,
                     plan=plan,
                     iteration=iteration,
+                    per_clip=ctx.per_clip,
                 )
                 break
             elif verdict.verdict == DirectorVerdict.FAILED:
                 # Stop iterating; surface the verdict.
                 break
             else:
-                # ACCEPTED_WITH_WARNINGS: try once more with the verifier feedback
+                # ACCEPTED_WITH_WARNINGS: never execute a warned plan — keep
+                # iterating so the planner can act on the verifier feedback.
                 last_plan = plan
-                edit_result = await self._editor.run(
-                    run_id=record.run_id,
-                    plan=plan,
-                    iteration=iteration,
-                )
-                # If the budget is exhausted on this iteration, we stop.
-                if iteration == self._settings.max_planner_iterations:
-                    break
 
         # Final status mapping
-        status = self._terminal_status(verdict)
+        status = self._terminal_status(verdict, edit_result)
         record_final = record_dict.model_copy(
             update={
                 "status": status,
@@ -212,6 +218,64 @@ class Orchestrator:
             plan=last_plan,
         )
 
+    async def resume_run(self, *, run_id: str) -> AutoResult:
+        """Resume a stored run at its last agreed state.
+
+        * If the run has an executed plan, that plan is re-executed against the
+          current backend state (existing items are NOT deduplicated — resume
+          rebuilds the agreed cut).
+        * If no plan was ever executed, the auto loop restarts from the run's
+          original inputs.
+
+        Refuses runs that are still in flight.
+        """
+        record = self._run_store.get_run(run_id)
+        if record is None:
+            raise ResumeError(f"unknown run_id: {run_id}")
+        if record.status in (RunStatus.PENDING, RunStatus.RUNNING):
+            raise ResumeError(f"run {run_id} is still {record.status.value}; not resumable")
+
+        plan: Plan | None = None
+        if record.final_plan_id:
+            plan = self._run_store.load_plan(record.final_plan_id)
+        if plan is None:
+            return await self.run_auto(
+                clip_paths=record.input_clips,
+                music_path=record.input_music,
+                user_prompt=record.user_prompt,
+            )
+
+        iteration = record.iterations + 1
+        running = record.model_copy(update={"status": RunStatus.RUNNING})
+        self._run_store.update_run(running)
+        per_clip = self._run_store.load_context(run_id)
+        edit_result = await self._editor.run(
+            run_id=run_id,
+            plan=plan,
+            iteration=iteration,
+            per_clip=per_clip,
+        )
+        status = self._terminal_status(
+            DirectorEvaluation(verdict=DirectorVerdict.APPROVED, overall=1.0),
+            edit_result,
+        )
+        final = running.model_copy(
+            update={
+                "status": status,
+                "iterations": iteration,
+                "final_plan_id": plan.plan_id,
+            }
+        )
+        self._run_store.update_run(final)
+        return AutoResult(
+            run_id=run_id,
+            status=status,
+            verdict=None,
+            iterations=iteration,
+            edit_result=edit_result,
+            plan=plan,
+        )
+
     # ---- helpers -----------------------------------------------------------
 
     async def _record_error(self, run_id: str, iteration: int, message: str) -> None:
@@ -225,14 +289,24 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _terminal_status(verdict: DirectorEvaluation | None) -> RunStatus:
-        if verdict is None:
+    def _terminal_status(
+        verdict: DirectorEvaluation | None,
+        edit_result: EditResult | None,
+    ) -> RunStatus:
+        if verdict is None or verdict.verdict == DirectorVerdict.FAILED:
             return RunStatus.FAILED
-        return {
-            DirectorVerdict.APPROVED: RunStatus.COMPLETED_APPROVED,
-            DirectorVerdict.ACCEPTED_WITH_WARNINGS: RunStatus.COMPLETED_WITH_WARNINGS,
-            DirectorVerdict.FAILED: RunStatus.FAILED,
-        }[verdict.verdict]
+        if verdict.verdict == DirectorVerdict.ACCEPTED_WITH_WARNINGS:
+            # Warned plans are never executed, so execution results cannot exist.
+            return RunStatus.COMPLETED_WITH_WARNINGS
+        # APPROVED: honest accounting of what actually landed.
+        if edit_result is None or not edit_result.errors:
+            return RunStatus.COMPLETED_APPROVED
+        any_ok = any(call.ok for call in edit_result.tool_calls)
+        return RunStatus.COMPLETED_WITH_WARNINGS if any_ok else RunStatus.FAILED
 
 
-__all__ = ["AutoResult", "Orchestrator"]
+class ResumeError(RuntimeError):
+    """Raised when a run cannot be resumed."""
+
+
+__all__ = ["AutoResult", "Orchestrator", "ResumeError"]

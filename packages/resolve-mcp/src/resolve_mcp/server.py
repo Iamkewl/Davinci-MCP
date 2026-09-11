@@ -134,7 +134,7 @@ def build_server(backend: ResolveBackend, *, allow_destructive: bool = False) ->
     @server.tool(name="append_clip", description="Append a media clip onto a timeline track.")
     def _append_clip(
         media_clip_id: str,
-        timeline_track_index: int = 0,
+        timeline_track_index: int = 1,
         start_seconds: float = 0.0,
         duration_seconds: float = 1.0,
         source_in_seconds: float = 0.0,

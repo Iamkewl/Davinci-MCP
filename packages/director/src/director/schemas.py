@@ -23,11 +23,6 @@ class StrictModel(BaseModel):
 # --- Ingestion: per-clip map --------------------------------------------------
 
 
-class ClipMood(enum.StrEnum):  # placeholder — not used yet but reserved for v2
-    UPCALM = "upcalm"
-    UNKNOWN = "unknown"
-
-
 class PerClipMap(StrictModel):
     """Output of the Contextualizer for one source clip."""
 

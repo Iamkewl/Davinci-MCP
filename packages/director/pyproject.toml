@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "google-genai>=0.3,<1",
     "librosa>=0.10,<1",
+    "openai>=1.60,<3",
     "soundfile>=0.12,<1",
     "numpy>=2.0,<3",
     "pydantic>=2.9,<3",

@@ -19,6 +19,9 @@ from pydantic import (
     NonNegativeInt,
 )
 
+TrackIndex = Annotated[int, Field(ge=1, description="1-based track index (Resolve V1/A1 semantics).")]
+
+
 
 class StrictModel(BaseModel):
     """Base model with strict validation: no silent coercion, no extra fields."""
@@ -174,7 +177,7 @@ class Transition(StrictModel):
 
     id: str
     timeline_item_id: str
-    track_index: NonNegativeInt
+    track_index: TrackIndex
     style: TransitionStyle = TransitionStyle.CROSS_DISSOLVE
     duration_seconds: NonNegativeFloat
     alignment: TransitionAlignment = TransitionAlignment.MID
@@ -182,7 +185,7 @@ class Transition(StrictModel):
 
 class TimelineItem(StrictModel):
     id: str
-    track_index: NonNegativeInt
+    track_index: TrackIndex
     media_clip_id: str
     start_seconds: NonNegativeFloat
     duration_seconds: NonNegativeFloat
@@ -199,7 +202,7 @@ class TimelineItem(StrictModel):
 
 
 class Track(StrictModel):
-    index: NonNegativeInt
+    index: TrackIndex
     kind: TrackKind
     items: list[TimelineItem]
 

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "pylsp": {
+      "command": ["uv", "run", "--no-sync", "pylsp"],
+      "extensions": [".py", ".pyi"],
+      "initialization": {
+        "pylsp": {
+          "plugins": {
+            "mypy": { "enabled": true },
+            "ruff": { "enabled": true },
+            "pycodestyle": { "enabled": false },
+            "flake8": { "enabled": false },
+            "autopep8": { "enabled": false },
+            "yapf": { "enabled": false }
+          }
+        }
+      }
+    }
+  }
+}

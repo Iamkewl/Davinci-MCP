@@ -16,6 +16,9 @@ dev-dependencies = [
     "ruff>=0.7,<1",
     "mypy>=1.13,<2",
     "types-PyYAML",
+    "python-lsp-server>=1.12,<2",
+    "pylsp-mypy>=0.7,<1",
+    "python-lsp-ruff>=2,<3",
 ]
 
 [tool.ruff]

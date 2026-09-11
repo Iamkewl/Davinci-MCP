@@ -109,6 +109,56 @@ def test_dropframe_rejects_dropped_frame() -> None:
         tc.timecode_to_frames("00:01:00;00")
 
 
+# --- drop-frame encode reference vectors (plan.md Phase 2) ---------------------
+
+
+def test_dropframe_encode_reference_vectors_2997() -> None:
+    """Encoder output pinned against the independently verified decoder.
+
+    Each expected label is derived from decode(label) == frames, e.g. 17982 is
+    30*600 nominal minus 9*2 dropped over minutes 1-9 ('00:10:00;00' -> 17982).
+    """
+    tc = TimeConverter(FrameRate(fps=29.97, drop_frame=True))
+    day = 144 * (10 * 30 * 60 - 9 * 2)  # 2,589,408 labels per 24h
+    vectors = [
+        (0, "00:00:00;00"),  # first label, no drops elapsed
+        (900, "00:00:30;00"),  # mid-minute interior, unaffected by drops
+        (1799, "00:00:59;29"),  # last label before minute 1's drop pair
+        (1800, "00:01:00;02"),  # first label after the 2 dropped frames of minute 1
+        (17982, "00:10:00;00"),  # tenth minute realigns: 18000 - 9*2 (regression vector)
+        (35964, "00:20:00;00"),  # two blocks: 36000 - 18*2
+        (53946, "00:30:00;00"),  # three blocks: 54000 - 27*2
+        (107891, "00:59:59;29"),  # last label of hour 0: 108000 - 54*2 - 1
+        (107892, "01:00:00;00"),  # hour boundary: 6 blocks * 17982
+        (2589407, "23:59:59;29"),  # last label of the day: 144*17982 - 1
+        (2589408, "00:00:00;00"),  # day wrap modulo 24h
+    ]
+    for frames, label in vectors:
+        assert tc.frames_to_timecode(frames).value == label, f"frames={frames}"
+        assert tc.timecode_to_frames(label) == frames % day, f"label={label}"
+
+
+def test_dropframe_encode_reference_vectors_5994() -> None:
+    """Same contract at 59.94df (F=60, D=4)."""
+    tc = TimeConverter(FrameRate(fps=59.94, drop_frame=True))
+    day = 144 * (10 * 60 * 60 - 9 * 4)  # 5,178,816 labels per 24h
+    vectors = [
+        (0, "00:00:00;00"),
+        (1800, "00:00:30;00"),
+        (3599, "00:00:59;59"),  # last label before minute 1's drop quartet
+        (3600, "00:01:00;04"),  # first label after the 4 dropped frames of minute 1
+        (35964, "00:10:00;00"),  # tenth minute realigns: 36000 - 9*4
+        (71928, "00:20:00;00"),  # two blocks: 72000 - 18*4
+        (215783, "00:59:59;59"),  # last label of hour 0: 216000 - 54*4 - 1
+        (215784, "01:00:00;00"),  # hour boundary: 6 blocks * 35964
+        (5178815, "23:59:59;59"),  # last label of the day: 144*35964 - 1
+        (5178816, "00:00:00;00"),  # day wrap modulo 24h
+    ]
+    for frames, label in vectors:
+        assert tc.frames_to_timecode(frames).value == label, f"frames={frames}"
+        assert tc.timecode_to_frames(label) == frames % day, f"label={label}"
+
+
 # --- 23.976 (non-drop but non-integer) ----------------------------------------
 
 

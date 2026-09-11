@@ -31,6 +31,7 @@ from ..schemas import (
     DirectorEvaluation,
     DirectorVerdict,
     OrchestratorEvent,
+    PerClipMap,
     Plan,
     RunMode,
     RunRecord,
@@ -75,6 +76,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     ok INTEGER NOT NULL,
     error TEXT,
     recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context (
+    run_id TEXT PRIMARY KEY,
+    per_clip_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plans_run ON plans(run_id);
 CREATE INDEX IF NOT EXISTS idx_verdicts_run ON verdicts(run_id);
@@ -239,6 +245,27 @@ class RunStore:
                 (run_id,),
             )
             return [DirectorEvaluation.model_validate_json(r["verdict_json"]) for r in cur.fetchall()]
+
+    # --- Contextualizer snapshot (resume support) -----------------------------
+
+    def save_context(self, run_id: str, per_clip: list[PerClipMap]) -> None:
+        with self._cur() as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO context(run_id, per_clip_json, created_at) VALUES (?,?,?)",
+                (
+                    run_id,
+                    json.dumps([item.model_dump(mode="json") for item in per_clip]),
+                    _now_iso(),
+                ),
+            )
+
+    def load_context(self, run_id: str) -> list[PerClipMap]:
+        with self._cur() as cur:
+            cur.execute("SELECT per_clip_json FROM context WHERE run_id=?", (run_id,))
+            row = cur.fetchone()
+            if row is None:
+                return []
+            return [PerClipMap.model_validate(item) for item in json.loads(row["per_clip_json"])]
 
     # --- Tool calls ---------------------------------------------------------
 

@@ -183,8 +183,8 @@ class FakeResolveBackend:
                 frame_rate=fr,
                 duration_seconds=0.0,
                 tracks=[
-                    Track(index=0, kind=TrackKind.VIDEO, items=[]),
-                    Track(index=1, kind=TrackKind.AUDIO, items=[]),
+                    Track(index=1, kind=TrackKind.VIDEO, items=[]),
+                    Track(index=2, kind=TrackKind.AUDIO, items=[]),
                 ],
             )
             self._timelines[name] = tl
@@ -626,8 +626,8 @@ class FakeResolveBackend:
                 frame_rate=before.frame_rate,
                 duration_seconds=0.0,
                 tracks=[
-                    Track(index=0, kind=TrackKind.VIDEO, items=[]),
-                    Track(index=1, kind=TrackKind.AUDIO, items=[]),
+                    Track(index=1, kind=TrackKind.VIDEO, items=[]),
+                    Track(index=2, kind=TrackKind.AUDIO, items=[]),
                 ],
             )
             return _delta(before, after_state, changed_path=f"timelines.{name}")

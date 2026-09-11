@@ -115,7 +115,7 @@ def test_append_clip_extends_duration(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)
     delta = fake.append_clip(
         media_clip_id=media_id,
-        timeline_track_index=0,
+        timeline_track_index=1,
         start_seconds=0.0,
         duration_seconds=4.0,
     )
@@ -130,8 +130,8 @@ def test_append_clip_extends_duration(fake: FakeResolveBackend) -> None:
 
 def test_append_sorts_and_appends(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)
-    fake.append_clip(media_id, 0, 0.0, 2.0)
-    fake.append_clip(media_id, 0, 2.0, 2.0)
+    fake.append_clip(media_id, 1, 0.0, 2.0)
+    fake.append_clip(media_id, 1, 2.0, 2.0)
     state = fake.get_timeline_state()
     items = state.tracks[0].items
     assert [i.start_seconds for i in items] == [0.0, 2.0]
@@ -140,8 +140,8 @@ def test_append_sorts_and_appends(fake: FakeResolveBackend) -> None:
 
 def test_insert_clip_shifts_existing(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)
-    fake.append_clip(media_id, 0, 0.0, 2.0)
-    delta = fake.insert_clip(media_id, 0, 0.0, 1.5)
+    fake.append_clip(media_id, 1, 0.0, 2.0)
+    delta = fake.insert_clip(media_id, 1, 0.0, 1.5)
     state = fake.get_timeline_state()
     starts = [i.start_seconds for i in state.tracks[0].items]
     # The originally-first item should have moved 1.5 seconds to the right.
@@ -152,7 +152,7 @@ def test_insert_clip_shifts_existing(fake: FakeResolveBackend) -> None:
 
 def test_delete_clip_returns_path(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)
-    delta = fake.append_clip(media_id, 0, 0.0, 2.0)
+    delta = fake.append_clip(media_id, 1, 0.0, 2.0)
     item_id = delta.after["tracks"][0]["items"][0]["id"]
     delta = fake.delete_clip(item_id)
     assert fake.get_timeline_state().duration_seconds == 0.0
@@ -167,8 +167,8 @@ def test_delete_unknown_item_raises(fake: FakeResolveBackend) -> None:
 
 def test_move_clip(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)
-    fake.append_clip(media_id, 0, 0.0, 2.0)
-    fake.append_clip(media_id, 0, 2.0, 2.0)
+    fake.append_clip(media_id, 1, 0.0, 2.0)
+    fake.append_clip(media_id, 1, 2.0, 2.0)
     original_first_id = fake.get_timeline_state().tracks[0].items[0].id
     delta = fake.move_clip(original_first_id, 10.0)
     items = fake.get_timeline_state().tracks[0].items
@@ -182,13 +182,13 @@ def test_move_clip(fake: FakeResolveBackend) -> None:
 def test_append_unknown_media_raises(fake: FakeResolveBackend) -> None:
     _seed(fake)
     with pytest.raises(NotFoundError):
-        fake.append_clip("clip_nope", 0, 0.0, 1.0)
+        fake.append_clip("clip_nope", 1, 0.0, 1.0)
 
 
 def test_append_video_to_audio_track_rejected(fake: FakeResolveBackend) -> None:
     media_id, _ = _seed(fake)  # media_id is a video
     with pytest.raises(InvalidStateError):
-        fake.append_clip(media_id, 1, 0.0, 1.0)  # audio track
+        fake.append_clip(media_id, 2, 0.0, 1.0)  # audio track
 
 
 def test_save_clears_modified_flag(fake: FakeResolveBackend) -> None:

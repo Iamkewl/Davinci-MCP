@@ -76,7 +76,7 @@ def test_append_clip_delta_shape(seeded: FakeResolveBackend) -> None:
     delta = append_clip(
         seeded,
         media_clip_id=media_id,
-        timeline_track_index=0,
+        timeline_track_index=1,
         start_seconds=0.0,
         duration_seconds=2.5,
     )
@@ -92,9 +92,9 @@ def test_full_round_trip(seeded: FakeResolveBackend) -> None:
     pool = seeded.list_media_pool()
     media_id = pool.clips[0].id
     # Append, then insert, then delete one — verify duration state after each step.
-    append_clip(seeded, media_clip_id=media_id, timeline_track_index=0, start_seconds=0.0, duration_seconds=2.0)
+    append_clip(seeded, media_clip_id=media_id, timeline_track_index=1, start_seconds=0.0, duration_seconds=2.0)
     assert get_timeline_state(seeded)["duration_seconds"] == 2.0
-    insert_clip(seeded, media_clip_id=media_id, timeline_track_index=0, timeline_position_seconds=2.0, duration_seconds=1.5)
+    insert_clip(seeded, media_clip_id=media_id, timeline_track_index=1, timeline_position_seconds=2.0, duration_seconds=1.5)
     assert get_timeline_state(seeded)["duration_seconds"] == 3.5
     # Delete the first item (start_seconds == 0.0). The 1.5-second item at 2.0 survives -> duration = 3.5.
     state = get_timeline_state(seeded)

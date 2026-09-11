@@ -37,7 +37,7 @@ async def test_repl_quits_cleanly(tmp_run: tuple[RunStore, EventLog, pathlib.Pat
     backend.create_project("interactive-reel", 24.0, 1920, 1080)
     backend.create_timeline("Timeline 1", 24.0)
     backend.import_media(["/clips/a.mp4"])
-    backend.append_clip(backend.list_media_pool().clips[0].id, 0, 0.0, 2.0)
+    backend.append_clip(backend.list_media_pool().clips[0].id, 1, 0.0, 2.0)
 
     settings = DirectorSettings(gemini_api_key=None)
     planner = Planner(gemini=None, settings=settings)
@@ -77,7 +77,7 @@ async def test_repl_interprets_instruction(tmp_run: tuple[RunStore, EventLog, pa
     backend.create_project("interactive-reel", 24.0, 1920, 1080)
     backend.create_timeline("Timeline 1", 24.0)
     clips = backend.import_media(["/clips/a.mp4"])
-    backend.append_clip(clips[0].id, 0, 0.0, 2.0)
+    backend.append_clip(clips[0].id, 1, 0.0, 2.0)
 
     settings = DirectorSettings(gemini_api_key=None)
     planner = Planner(gemini=None, settings=settings)

@@ -1,7 +1,7 @@
 """Unified time model: seconds, timecode, and frames.
 
-Every resolve-mcp tool that touches time accepts any of the three forms and converts
-internally. Conversion maths live HERE. We support non-drop timecode for frame rates
+resolve-mcp tools accept seconds on the wire; frame/timecode conversion maths live
+HERE. We support non-drop timecode for frame rates
 other than 29.97/59.94, true SMPTE drop-frame for 29.97 and 59.94, and treat the input
 fps as authoritative (read from project, never guessed).
 
@@ -101,8 +101,6 @@ class TimeConverter:
             msg = f"frames must be >= 0, got {frames}"
             raise ValueError(msg)
         if self._fps.drop_frame:
-            # Drop-frame encode is numerically delicate; we use a binary-search
-            # inversion of the *verified* decoder so round-trips are guaranteed.
             return self._frames_to_dropframe_tc(frames)
         return self._frames_to_nondrop_tc(frames)
 
@@ -112,23 +110,6 @@ class TimeConverter:
         if round(self.fps_float) in (30, 60) and ";" in value:
             return self._dropframe_to_frames(hh, mm, ss, ff)
         return self._nondrop_to_frames(hh, mm, ss, ff)
-
-    # ---------- parsing helpers ----------
-
-    @staticmethod
-    def parse_input(value: float | int | str | Timecode) -> tuple[float, str]:
-        """Return a (seconds, kind) tuple; conversion to seconds uses 30 fps as a
-        placeholder when the value is already a Timecode (callers should use the
-        project-scoped TimeConverter.in/timecode_to_seconds).
-        """
-        # This helper exists for logging; we do not perform real conversion here.
-        if isinstance(value, Timecode):
-            return (0.0, "timecode")
-        if isinstance(value, str):
-            return (0.0, "timecode")
-        if isinstance(value, int):
-            return (float(value), "frames")
-        return (float(value), "seconds")
 
     # ---------- internals ----------
 
@@ -152,32 +133,33 @@ class TimeConverter:
         return ((hh * 3600) + (mm * 60) + ss) * fps_rounded + ff
 
     def _frames_to_dropframe_tc(self, frames: int) -> Timecode:
-        """SMPTE 12M drop-frame encode (Heidelberger algorithm)."""
-        fps_rounded = self.fps_nominal
-        D = 2 if fps_rounded == 30 else 4
-        F = fps_rounded
-        FPmin = F * 60 - D                  # 1798 / 3596
-        FPhour = F * 3600                   # nominal frames per hour
-        FP10min = F * 600                   # NOMINAL (un-corrected)
+        """SMPTE 12M drop-frame encode; exact inverse of :meth:`_dropframe_to_frames`.
 
-        # Wrap 24h using nominal clock.
-        frame = frames % (F * 3600 * 24)
-
-        d = frame // FPhour
-        frame = frame - d * FPhour
-        m = frame // FP10min
-        frame = frame - m * FP10min
-        if frame > D:
-            extra = (frame - D) // FPmin
-            frame = frame + 9 * D * m + D * extra
+        The label-day splits into 144 ten-minute blocks. With ``M = F*60`` nominal
+        labels per minute and ``D`` dropped per non-tenth minute, block ``b`` holds
+        ``10*M - 9*D`` consecutive frame numbers. Inverting the decoder's
+        ``n = A - dropped`` recovers the nominal (drop-corrected) count ``A``, which
+        then splits into hh:mm:ss:ff exactly like non-drop timecode.
+        """
+        F = self.fps_nominal
+        D = 2 if F == 30 else 4
+        M = F * 60
+        block = 10 * M - 9 * D
+        n = frames % (144 * block)
+        b, rem = divmod(n, block)
+        if rem < M:
+            # First minute of a block is a tenth-minute: its D-frame gap sits at the end.
+            A = 10 * M * b + rem
         else:
-            frame = frame + 9 * D * m
-        ff = frame % F
-        total_seconds = frame // F
+            # Minute j of the block owns rem in [j*(M-D) + D, (j+1)*(M-D) + D).
+            j = (rem - D) // (M - D)
+            A = 10 * M * b + j * M + rem - j * (M - D)
+        ff = A % F
+        total_seconds = A // F
         ss = total_seconds % 60
         total_minutes = total_seconds // 60
         mm = total_minutes % 60
-        hh = (total_minutes // 60 + d) % 24
+        hh = total_minutes // 60
         return Timecode(value=f"{hh:02d}:{mm:02d}:{ss:02d};{ff:02d}")
 
     def _dropframe_to_frames(self, hh: int, mm: int, ss: int, ff: int) -> int:

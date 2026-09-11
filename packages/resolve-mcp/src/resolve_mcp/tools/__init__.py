@@ -128,7 +128,7 @@ def get_timeline_state(backend: ResolveBackend) -> dict[str, Any]:
 def append_clip(
     backend: ResolveBackend,
     media_clip_id: str,
-    timeline_track_index: int = 0,
+    timeline_track_index: int = 1,
     start_seconds: float = 0.0,
     duration_seconds: float = 1.0,
     source_in_seconds: float = 0.0,
@@ -137,7 +137,7 @@ def append_clip(
 
     Args:
         media_clip_id: Media-clip id from the media pool.
-        timeline_track_index: 0 for video, 1 for audio in the standard layout.
+        timeline_track_index: 1-based; 1 for video track 1, 2 for audio track 1 (Resolve V1/A1 semantics).
         start_seconds: Where in the timeline to place the clip.
         duration_seconds: Length of the clip on the timeline (seconds).
         source_in_seconds: In-point inside the source clip.

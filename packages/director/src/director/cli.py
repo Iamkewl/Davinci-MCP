@@ -25,15 +25,15 @@ import typer
 
 from .agents import Director, Editor, Planner
 from .agents.logging_setup import configure_logging, get_logger
-from .ingestion.gemini_client import GeminiClient, get_gemini_client
 from .interactive import InteractiveSession, run_repl
+from .llm import LLMClient, get_llm_client
 from .mcp_client import StdioResolveClient
-from .pipeline import Orchestrator
+from .pipeline import Orchestrator, ResumeError
 from .settings import DirectorSettings
 from .store import EventLog, RunStore
 
 app = typer.Typer(no_args_is_help=True, help="Director orchestrator commands.")
-inspect_app = typer.Typer(help="Operations on past runs (resume, list, show).")
+inspect_app = typer.Typer(help="Operations on past runs (list, show).")
 app.add_typer(inspect_app, name="run")
 
 logger = get_logger("director.cli")
@@ -49,6 +49,21 @@ def _store_paths(settings: DirectorSettings) -> tuple[pathlib.Path, pathlib.Path
     return base / "runs.sqlite", base / "events.jsonl"
 
 
+async def _spawn_client(backend: str, uv_project: str | None) -> StdioResolveClient:
+    """Spawn a resolve-mcp server subprocess for the requested backend."""
+    if backend not in {"fake", "davinci"}:
+        typer.echo(f"unsupported backend {backend!r}", err=True)
+        raise typer.Exit(code=2)
+    client = StdioResolveClient.default(
+        backend=backend,
+        allow_destructive=False,
+        log_level="WARNING",
+        uv_project=uv_project,
+    )
+    await client.start()
+    return client
+
+
 async def _auto_async(
     *,
     clips_dir: pathlib.Path,
@@ -57,6 +72,7 @@ async def _auto_async(
     backend: str,
     uv_project: str | None,
     fast: bool,
+    llm_choice: str | None = None,
 ) -> None:
     settings = _director_settings()
     configure_logging("INFO")
@@ -71,27 +87,22 @@ async def _auto_async(
         typer.echo(f"music track not found: {music_path}", err=True)
         raise typer.Exit(code=1)
 
-    gemini: GeminiClient | None = None if fast else get_gemini_client(settings)
+    llm: LLMClient | None
+    if fast:
+        llm = None
+    else:
+        provider = llm_choice or settings.llm_provider
+        llm = get_llm_client(settings.model_copy(update={"llm_provider": provider}))
 
     sqlite_path, event_path = _store_paths(settings)
     store = RunStore(sqlite_path)
     log = EventLog(event_path)
 
-    if backend == "fake":
-        client = StdioResolveClient.default(
-            backend="fake",
-            allow_destructive=False,
-            log_level="WARNING",
-            uv_project=uv_project,
-        )
-        await client.start()
-    else:
-        typer.echo(f"unsupported backend {backend!r}", err=True)
-        raise typer.Exit(code=2)
+    client = await _spawn_client(backend, uv_project)
 
     orchestrator = Orchestrator(
         settings=settings,
-        gemini=gemini,
+        llm=llm,
         client=client,
         run_store=store,
         event_log=log,
@@ -136,6 +147,11 @@ def auto(
         "--fast",
         help="Skip Gemini integration (use offline planner + director).",
     ),
+    llm_choice: str | None = typer.Option(
+        None,
+        "--llm",
+        help="LLM provider override: gemini | openai_compatible | none.",
+    ),
 ) -> None:
     """Make a beat-synced timeline from clips + music + prompt."""
     asyncio.run(
@@ -146,6 +162,7 @@ def auto(
             backend=backend,
             uv_project=uv_project,
             fast=fast,
+            llm_choice=llm_choice,
         )
     )
 
@@ -155,30 +172,26 @@ async def _interactive_async(
     backend: str,
     uv_project: str | None,
     fast: bool,
+    llm_choice: str | None = None,
 ) -> None:
     settings = _director_settings()
     configure_logging("INFO")
-    gemini: GeminiClient | None = None if fast else get_gemini_client(settings)
+    llm: LLMClient | None
+    if fast:
+        llm = None
+    else:
+        provider = llm_choice or settings.llm_provider
+        llm = get_llm_client(settings.model_copy(update={"llm_provider": provider}))
     sqlite_path, event_path = _store_paths(settings)
     store = RunStore(sqlite_path)
     log = EventLog(event_path)
 
-    if backend == "fake":
-        client = StdioResolveClient.default(
-            backend="fake",
-            allow_destructive=False,
-            log_level="WARNING",
-            uv_project=uv_project,
-        )
-        await client.start()
-    else:
-        typer.echo(f"unsupported backend {backend!r}", err=True)
-        raise typer.Exit(code=2)
+    client = await _spawn_client(backend, uv_project)
 
-    planner = Planner(gemini=gemini, settings=settings)
-    director = Director(gemini=gemini, settings=settings)
+    planner = Planner(llm=llm, settings=settings)
+    director = Director(llm=llm, settings=settings)
     editor = Editor(
-        gemini=None,
+        llm=None,
         settings=settings,
         client=client,
         run_store=store,
@@ -214,10 +227,15 @@ def interactive(
     backend: str = typer.Option("fake", "--backend", help="resolve-mcp backend (fake)."),
     uv_project: str | None = typer.Option(None, "--uv-project", help="uv project dir for resolve-mcp."),
     fast: bool = typer.Option(False, "--fast", help="Offline REPL with deterministic planner/director."),
+    llm_choice: str | None = typer.Option(
+        None,
+        "--llm",
+        help="LLM provider override: gemini | openai_compatible | none.",
+    ),
 ) -> None:
     """Start an interactive textual REPL against the resolve-mcp server."""
     asyncio.run(
-        _interactive_async(backend=backend, uv_project=uv_project, fast=fast)
+        _interactive_async(backend=backend, uv_project=uv_project, fast=fast, llm_choice=llm_choice)
     )
 
 
@@ -253,6 +271,59 @@ def run_show(run_id: str = typer.Argument(...)) -> None:
     }
     typer.echo(json.dumps(out, indent=2))
     store.close()
+
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Run id from `director run list`."),
+    backend: str = typer.Option("fake", "--backend", help="Backend for resolve-mcp (fake)."),
+    uv_project: str | None = typer.Option(None, "--uv-project", help="uv project dir for resolve-mcp."),
+    fast: bool = typer.Option(False, "--fast", help="Offline fallback if the run must fully restart."),
+    llm_choice: str | None = typer.Option(None, "--llm", help="LLM provider override (restart path only)."),
+) -> None:
+    """Resume a stored run at its last agreed state (re-executes the agreed plan)."""
+    asyncio.run(_resume_async(run_id=run_id, backend=backend, uv_project=uv_project))
+
+
+async def _resume_async(*, run_id: str, backend: str, uv_project: str | None) -> None:
+    settings = _director_settings()
+    configure_logging("INFO")
+    sqlite_path, event_path = _store_paths(settings)
+    store = RunStore(sqlite_path)
+    log = EventLog(event_path)
+    record = store.get_run(run_id)
+    if record is None:
+        typer.echo(f"run {run_id} not found in {sqlite_path}", err=True)
+        raise typer.Exit(code=1)
+
+    client = await _spawn_client(backend, uv_project)
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        llm=None,
+        client=client,
+        run_store=store,
+        event_log=log,
+    )
+    try:
+        result = await orchestrator.resume_run(run_id=run_id)
+    except ResumeError as err:
+        typer.echo(str(err), err=True)
+        raise typer.Exit(code=1) from err
+    finally:
+        await client.close()
+    typer.echo(
+        json.dumps(
+            {
+                "run_id": result.run_id,
+                "status": result.status.value,
+                "iterations": result.iterations,
+                "plan_id": result.plan.plan_id if result.plan else None,
+            },
+            indent=2,
+        )
+    )
 
 
 main = app

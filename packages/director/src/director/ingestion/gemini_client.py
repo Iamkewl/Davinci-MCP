@@ -167,6 +167,10 @@ class GeminiClient:
         # over-generation cannot slip into the editor.
         return PerClipMap.model_validate(payload)
 
+    async def aclose(self) -> None:
+        """No-op: the google-genai client holds no per-instance resources."""
+        return None
+
     # ---- internal helpers ----
 
     @staticmethod

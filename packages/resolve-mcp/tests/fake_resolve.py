@@ -1,8 +1,27 @@
-"""Record/replay harness for the live DaVinci Resolve scripting API surface.
+"""Record/replay harness modeling the DOCUMENTED DaVinci Resolve scripting API.
 
-Each fake class takes its parent ``CallLog`` explicitly so the same log is
-shared anywhere in the call graph. This keeps the daemon's constructor and
-the test fixture pointing at the same recorder.
+Every method here corresponds to an entry in Blackmagic's
+"DaVinci Resolve Scripting API" README (v18+):
+
+* ``Timeline.GetTrackCount(trackType)`` — one call per kind ("video"/"audio").
+* ``Timeline.GetItemListInTrack(trackType, index)`` — 1-based index per kind.
+* ``MediaPool.*`` — AppendToTimeline, CreateEmptyTimeline, ImportMedia, AddSubFolder,
+  SetCurrentFolder, DeleteClips, DeleteTimelines.
+* ``TimelineItem.*`` — GetStart/GetDuration/GetName/GetClipProperty/
+  GetMediaPoolItem/GetSourceStartFrame/GetSourceEndFrame/SetProperty/AddMarker/Delete.
+* ``Project.*`` — GetTimelineCount, GetTimelineByIndex, SetCurrentTimeline,
+  SetRenderSettings, AddRenderJob, StartRendering, GetRenderJobStatus,
+  GetRenderJobList, GetMediaPool, GetCurrentTimeline, GetSetting/SetSetting.
+* ``ProjectManager.*`` — CreateProject, LoadProject, SaveProject,
+  GetCurrentProject, GetProjectListInCurrentFolder.
+* ``Resolve.*`` — scriptapp, GetProjectManager, Quit.
+
+Each fake class takes its parent :class:`CallLog` explicitly so the same log is
+shared anywhere in the call graph.
+
+.. note:: Behavioural fidelity (frame placement on append, fade handle frames,
+   etc.) is exercised by the offline tests; the live-Resolve smoke checklist in
+   plan.md still runs manually because a harness can never verify reality.
 """
 
 from __future__ import annotations
@@ -37,11 +56,99 @@ class _LogHolder:
         self._log = log
 
 
+# ---------------------------------------------------------------------------
+# Timeline items
+# ---------------------------------------------------------------------------
+
+
+class FakeTimelineItem(_LogHolder):
+    """Documented ``TimelineItem``: frame ranges, properties, markers, delete."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        log: CallLog,
+        track_type: str = "video",
+        track_index: int = 1,
+        start_frame: int = 0,
+        duration_frames: int = 24,
+        pool_item: FakePoolItem | None = None,
+        parent: FakeTimeline | None = None,
+    ) -> None:
+        super().__init__(log)
+        self._name = name
+        self._track_type = track_type
+        self._track_index = track_index
+        self._start_frame = start_frame
+        self._duration_frames = duration_frames
+        self._pool_item = pool_item
+        self._parent = parent
+
+    # -- introspection -------------------------------------------------------
+
+    def GetName(self) -> str:
+        self._log.record("TimelineItem.GetName")
+        return self._name
+
+    def GetStart(self) -> int:
+        self._log.record("TimelineItem.GetStart")
+        return self._start_frame
+
+    def GetDuration(self) -> int:
+        self._log.record("TimelineItem.GetDuration")
+        return self._duration_frames
+
+    def GetClipProperty(self) -> dict[str, Any]:
+        self._log.record("TimelineItem.GetClipProperty")
+        return {"Clip Name": self._name}
+
+    def GetMediaPoolItem(self) -> FakePoolItem | None:
+        self._log.record("TimelineItem.GetMediaPoolItem")
+        return self._pool_item
+
+    def GetSourceStartFrame(self) -> int:
+        self._log.record("TimelineItem.GetSourceStartFrame")
+        return 0
+
+    def GetSourceEndFrame(self) -> int:
+        self._log.record("TimelineItem.GetSourceEndFrame")
+        return self._duration_frames
+
+    # -- mutation ------------------------------------------------------------
+
+    def SetProperty(self, key: str, value: Any) -> bool:
+        self._log.record("TimelineItem.SetProperty", key, value)
+        return True
+
+    def AddMarker(self, frame: int, color: str, name: str, note: str) -> bool:
+        self._log.record("TimelineItem.AddMarker", frame, color, name, note)
+        return True
+
+    def Delete(self) -> bool:
+        self._log.record("TimelineItem.Delete")
+        if self._parent is not None:
+            self._parent._remove_item(self)
+            return True
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Timeline
+# ---------------------------------------------------------------------------
+
+
 class FakeTimeline(_LogHolder):
+    """Documented ``Timeline``: GetTrackCount/GetItemListInTrack take a type."""
+
     def __init__(self, name: str, log: CallLog) -> None:
         super().__init__(log)
         self.name = name
-        self._items: list[FakeTimelineItem] = []
+        # media_type -> intra-type 1-based track index -> items
+        self._tracks: dict[str, dict[int, list[FakeTimelineItem]]] = {
+            "video": {1: []},
+            "audio": {1: []},
+        }
 
     def GetName(self) -> str:
         self._log.record("Timeline.GetName")
@@ -57,124 +164,51 @@ class FakeTimeline(_LogHolder):
         self._log.record("Timeline.SetSetting", key, value)
         return True
 
-    def GetTrackCount(self) -> int:
-        self._log.record("Timeline.GetTrackCount")
-        return 2
+    def GetTrackCount(self, track_type: str) -> int:
+        self._log.record("Timeline.GetTrackCount", track_type)
+        return len(self._tracks.get(track_type, {}))
 
-    def GetTrackType(self, idx: int) -> str:
-        self._log.record("Timeline.GetTrackType", idx)
-        return "video" if idx == 1 else "audio"
+    def GetItemListInTrack(self, track_type: str, index: int) -> list[FakeTimelineItem]:
+        self._log.record("Timeline.GetItemListInTrack", track_type, index)
+        return list(self._tracks.get(track_type, {}).get(index, []))
 
-    def GetItemListInTrack(self, tr_type: str) -> list[FakeTimelineItem]:
-        self._log.record("Timeline.GetItemListInTrack", tr_type)
-        return self._items
+    # -- harness-only mutation ------------------------------------------------
 
-    def AppendItemsInTimeline(self, items: list[tuple[Any, dict[str, Any]]]) -> bool:
-        self._log.record("Timeline.AppendItemsInTimeline", items)
-        for pool_item, info in items:
-            _name = "?"
-            try:
-                _name = pool_item.GetName()
-            except Exception:
-                try:
-                    _name = getattr(pool_item, "name", "?")
-                except Exception:
-                    _name = "?"
-            entry_name = _name
-            self._items.append(
-                FakeTimelineItem(
-                    name=entry_name,
-                    log=self._log,
-                    track_index=int(info.get("trackIndex", 1)),
-                    start_frame=int(info.get("startFrame", 0)),
-                    duration_frames=max(int(info.get("endFrame", 0)) - int(info.get("startFrame", 0)), 1),
-                )
-            )
-        return True
+    def _place_item(self, info: dict[str, Any], pool_item: FakePoolItem) -> FakeTimelineItem:
+        media_type = "video" if info.get("mediaType", 1) == 1 else "audio"
+        track_index = int(info.get("trackIndex", 1))
+        track = self._tracks.setdefault(media_type, {}).setdefault(track_index, [])
+        start_frame = int(info.get("recordFrame", 0))
+        if "recordFrame" not in info:
+            start_frame = max((it._start_frame + it._duration_frames for it in track), default=0)
+        duration = max(1, int(info.get("endFrame", 1)) - int(info.get("startFrame", 0)))
+        item = FakeTimelineItem(
+            name=pool_item.GetName(),
+            log=self._log,
+            track_type=media_type,
+            track_index=track_index,
+            start_frame=start_frame,
+            duration_frames=duration,
+            pool_item=pool_item,
+            parent=self,
+        )
+        track.append(item)
+        track.sort(key=lambda i: i._start_frame)
+        return item
 
-    def DeleteClips(self, items: list[dict[str, Any]]) -> bool:
-        self._log.record("Timeline.DeleteClips", items)
-        return True
-
-    def AddTransition(self, track_index: int, info: dict[str, Any]) -> Any:
-        self._log.record("Timeline.AddTransition", track_index, info)
-        return True
+    def _remove_item(self, item: FakeTimelineItem) -> None:
+        track = self._tracks.get(item._track_type, {}).get(item._track_index, [])
+        if item in track:
+            track.remove(item)
 
 
-class FakeTimelineItem(_LogHolder):
-    def __init__(
-        self,
-        name: str,
-        *,
-        log: CallLog,
-        track_index: int = 1,
-        start_frame: int = 0,
-        duration_frames: int = 24,
-    ) -> None:
-        super().__init__(log)
-        self._name = name
-        self._track_index = track_index
-        self._start_frame = start_frame
-        self._duration_frames = duration_frames
-
-    def GetStart(self) -> int:
-        self._log.record("TimelineItem.GetStart")
-        return self._start_frame
-
-    def GetDuration(self) -> int:
-        self._log.record("TimelineItem.GetDuration")
-        return self._duration_frames
-
-    def GetName(self) -> str:
-        self._log.record("TimelineItem.GetName")
-        return self._name
-
-    def GetClipProperty(self) -> dict[str, Any]:
-        self._log.record("TimelineItem.GetClipProperty")
-        return {"Clip Name": self._name}
-
-    def SetProperty(self, kind: str, props: dict[str, Any]) -> bool:
-        self._log.record("TimelineItem.SetProperty", kind, props)
-        return True
-
-    def AddMarker(self, frame: int, color: str, name: str, note: str) -> bool:
-        self._log.record("TimelineItem.AddMarker", frame, color, name, note)
-        return True
-
-
-class FakeMediaPool(_LogHolder):
-    def __init__(self, log: CallLog) -> None:
-        super().__init__(log)
-        self._root = FakeFolder("Master", log=log, pool=self)
-
-    def GetRootFolder(self) -> FakeFolder:
-        self._log.record("MediaPool.GetRootFolder")
-        return self._root
-
-    def GetClipList(self) -> list[FakePoolItem]:
-        self._log.record("MediaPool.GetClipList")
-        return self._root.GetClipList()
-
-    def ImportMedia(self, paths: list[str]) -> list[FakePoolItem]:
-        self._log.record("MediaPool.ImportMedia", list(paths))
-        items: list[FakePoolItem] = []
-        for p in paths:
-            it = FakePoolItem(name=p.rsplit("/", 1)[-1], log=self._log)
-            self._root.AddClip(it)
-            items.append(it)
-        return items
-
-    def AddSubFolder(self, folder: FakeFolder, name: str) -> FakeFolder:
-        self._log.record("MediaPool.AddSubFolder", folder.GetName(), name)
-        return folder
-
-    def CreateEmptyTimeline(self, name: str) -> FakeTimeline:
-        self._log.record("MediaPool.CreateEmptyTimeline", name)
-        return FakeTimeline(name, self._log)
+# ---------------------------------------------------------------------------
+# Media pool tree
+# ---------------------------------------------------------------------------
 
 
 class FakeFolder(_LogHolder):
-    def __init__(self, name: str, *, log: CallLog, pool: FakeMediaPool | None = None) -> None:
+    def __init__(self, name: str, *, log: CallLog) -> None:
         super().__init__(log)
         self.name = name
         self._clips: list[FakePoolItem] = []
@@ -192,7 +226,7 @@ class FakeFolder(_LogHolder):
         self._log.record("Folder.GetSubFolderList")
         return list(self._sub)
 
-    def AddClip(self, item: FakePoolItem) -> None:
+    def _add_clip(self, item: FakePoolItem) -> None:
         self._clips.append(item)
 
 
@@ -209,9 +243,79 @@ class FakePoolItem(_LogHolder):
         self._log.record("PoolItem.GetClipProperty")
         return {"Clip Name": self._name, "File Name": self._name, "File Path": self._name}
 
-    def Delete(self) -> bool:
-        self._log.record("PoolItem.Delete")
+
+class FakeMediaPool(_LogHolder):
+    """Documented ``MediaPool`` incl. AppendToTimeline & DeleteTimelines."""
+
+    def __init__(self, log: CallLog) -> None:
+        super().__init__(log)
+        self._root = FakeFolder("Master", log=log)
+        self._current: FakeFolder = self._root
+        self._timelines: list[FakeTimeline] = []
+        self._current_timeline: FakeTimeline | None = None
+
+    def GetRootFolder(self) -> FakeFolder:
+        self._log.record("MediaPool.GetRootFolder")
+        return self._root
+
+    def AddSubFolder(self, folder: FakeFolder, name: str) -> FakeFolder | bool:
+        self._log.record("MediaPool.AddSubFolder", folder.GetName(), name)
+        if any(sub.GetName() == name for sub in folder._sub):
+            return False
+        sub = FakeFolder(name, log=self._log)
+        folder._sub.append(sub)
+        return sub
+
+    def SetCurrentFolder(self, folder: FakeFolder) -> bool:
+        self._log.record("MediaPool.SetCurrentFolder", folder.GetName())
+        self._current = folder
         return True
+
+    def ImportMedia(self, paths: list[str]) -> list[FakePoolItem]:
+        self._log.record("MediaPool.ImportMedia", list(paths))
+        items = [FakePoolItem(name=p.rsplit("/", 1)[-1], log=self._log) for p in paths]
+        for it in items:
+            self._current._add_clip(it)
+        return items
+
+    def CreateEmptyTimeline(self, name: str) -> FakeTimeline:
+        self._log.record("MediaPool.CreateEmptyTimeline", name)
+        tl = FakeTimeline(name, self._log)
+        self._timelines.append(tl)
+        self._current_timeline = tl
+        return tl
+
+    def AppendToTimeline(self, infos: list[dict[str, Any]]) -> list[FakeTimelineItem]:
+        self._log.record("MediaPool.AppendToTimeline", infos)
+        tl = self._current_timeline or (self._timelines[0] if self._timelines else None)
+        if tl is None:
+            return []
+        return [tl._place_item(info, info["mediaPoolItem"]) for info in infos]
+
+    def DeleteClips(self, clips: list[FakePoolItem]) -> bool:
+        self._log.record("MediaPool.DeleteClips", clips)
+        doomed = set(map(id, clips))
+        for folder in self._walk_folders(self._root):
+            folder._clips = [c for c in folder._clips if id(c) not in doomed]
+        return True
+
+    def DeleteTimelines(self, timelines: list[FakeTimeline]) -> bool:
+        self._log.record("MediaPool.DeleteTimelines", timelines)
+        doomed = set(map(id, timelines))
+        self._timelines = [t for t in self._timelines if id(t) not in doomed]
+        if self._current_timeline is not None and id(self._current_timeline) in doomed:
+            self._current_timeline = self._timelines[0] if self._timelines else None
+        return True
+
+    def _walk_folders(self, folder: FakeFolder):
+        yield folder
+        for sub in folder._sub:
+            yield from self._walk_folders(sub)
+
+
+# ---------------------------------------------------------------------------
+# Project, ProjectManager, Resolve
+# ---------------------------------------------------------------------------
 
 
 class FakeProject(_LogHolder):
@@ -219,7 +323,13 @@ class FakeProject(_LogHolder):
         super().__init__(log)
         self.name = name
         self._mp = FakeMediaPool(log)
-        self._timeline = FakeTimeline("Timeline 1", log)
+        # Every project starts with one empty timeline, like real Resolve.
+        first_tl = FakeTimeline("Timeline 1", log)
+        self._mp._timelines.append(first_tl)
+        self._mp._current_timeline = first_tl
+        self._render_settings: dict[str, Any] = {}
+        self._render_jobs: dict[str, dict[str, Any]] = {}
+        self._job_seq = 1
 
     def GetName(self) -> str:
         self._log.record("Project.GetName")
@@ -241,41 +351,61 @@ class FakeProject(_LogHolder):
 
     def GetCurrentTimeline(self) -> FakeTimeline | None:
         self._log.record("Project.GetCurrentTimeline")
-        return self._timeline
+        return self._mp._current_timeline
 
-    def GetResolutionWidth(self) -> int:
-        self._log.record("Project.GetResolutionWidth")
-        return 1920
+    def GetTimelineCount(self) -> int:
+        self._log.record("Project.GetTimelineCount")
+        return len(self._mp._timelines)
 
-    def GetResolutionHeight(self) -> int:
-        self._log.record("Project.GetResolutionHeight")
-        return 1080
+    def GetTimelineByIndex(self, index: int) -> FakeTimeline | None:
+        self._log.record("Project.GetTimelineByIndex", index)
+        try:
+            return self._mp._timelines[index - 1]
+        except IndexError:
+            return None
 
-    def SaveProject(self) -> bool:
-        self._log.record("Project.SaveProject")
+    def SetCurrentTimeline(self, timeline: FakeTimeline) -> bool:
+        self._log.record("Project.SetCurrentTimeline", timeline.GetName())
+        if timeline not in self._mp._timelines:
+            return False
+        self._mp._current_timeline = timeline
         return True
 
-    def AddRenderJob(self) -> int:
+    def SetRenderSettings(self, settings: dict[str, Any]) -> bool:
+        self._log.record("Project.SetRenderSettings", settings)
+        self._render_settings.update(settings)
+        return True
+
+    def AddRenderJob(self) -> str:
         self._log.record("Project.AddRenderJob")
-        return 1
+        job_id = str(self._job_seq)
+        self._job_seq += 1
+        self._render_jobs[job_id] = {"JobStatus": "queued", "CompletionPercentage": 0.0}
+        return job_id
 
-    def StartRendering(self, job: Any) -> bool:
-        self._log.record("Project.StartRendering", job)
+    def StartRendering(self, job_id: str) -> bool:
+        self._log.record("Project.StartRendering", job_id)
+        if job_id not in self._render_jobs:
+            return False
+        self._render_jobs[job_id]["JobStatus"] = "rendering"
         return True
 
-    def GetRenderJobs(self) -> Any:
-        self._log.record("Project.GetRenderJobs")
-        return {"1": "queued"}
+    def GetRenderJobList(self) -> list[dict[str, Any]]:
+        self._log.record("Project.GetRenderJobList")
+        return [{"JobId": jid, **job} for jid, job in self._render_jobs.items()]
 
-    def GetRenderJob(self, job_id: str) -> Any:
-        self._log.record("Project.GetRenderJob", job_id)
-        return {"JobId": job_id, "Status": "Rendering", "Progress": 0.0}
+    def GetRenderJobStatus(self, job_id: str) -> dict[str, Any]:
+        self._log.record("Project.GetRenderJobStatus", job_id)
+        if job_id not in self._render_jobs:
+            return {}
+        return dict(self._render_jobs[job_id])
 
 
 class FakeProjectManager(_LogHolder):
     def __init__(self, log: CallLog) -> None:
         super().__init__(log)
-        self._current = FakeProject("DefaultProject", log=log)
+        self._projects: dict[str, FakeProject] = {"Timeline 1": FakeProject("Timeline 1", log=log)}
+        self._current: FakeProject = next(iter(self._projects.values()))
 
     def GetCurrentProject(self) -> FakeProject:
         self._log.record("ProjectManager.GetCurrentProject")
@@ -283,13 +413,24 @@ class FakeProjectManager(_LogHolder):
 
     def CreateProject(self, name: str) -> FakeProject:
         self._log.record("ProjectManager.CreateProject", name)
-        self._current = FakeProject(name, log=self._log)
-        return self._current
+        proj = FakeProject(name, log=self._log)
+        self._projects[name] = proj
+        self._current = proj
+        return proj
 
     def LoadProject(self, name: str) -> FakeProject:
         self._log.record("ProjectManager.LoadProject", name)
-        self._current = FakeProject(name, log=self._log)
-        return self._current
+        if name in self._projects:
+            self._current = self._projects[name]
+        return self._current if self._current.name == name else FakeProject(name, log=self._log)
+
+    def SaveProject(self) -> bool:
+        self._log.record("ProjectManager.SaveProject")
+        return True
+
+    def GetProjectListInCurrentFolder(self) -> list[str]:
+        self._log.record("ProjectManager.GetProjectListInCurrentFolder")
+        return list(self._projects)
 
 
 class FakeResolve(_LogHolder):
@@ -308,9 +449,9 @@ class FakeResolve(_LogHolder):
 
 
 def install_fake_resolve(monkeypatch: Any) -> tuple[FakeResolve, CallLog]:
-    """Install a fake Resolve scripting module so backend can import it without the
-    real SDK present. The same :class:`FakeResolve` instance is shared between the
-    fixture and the backend so the call log records every backend-invoked method."""
+    """Install the harness as ``DaVinciResolveScript`` so the backend imports it
+    without a real Resolve install. Same :class:`FakeResolve` + :class:`CallLog`
+    shared between fixture and backend."""
     log = CallLog()
     fake = FakeResolve(log)
 

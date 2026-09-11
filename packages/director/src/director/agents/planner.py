@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -21,6 +21,9 @@ from ..ingestion.gemini_client import GeminiClient, GeminiError
 from ..schemas import PerClipMap, Plan, PlanOp, PlanOpKind
 from ..settings import DirectorSettings
 from .base import Agent, InvalidModelOutput
+
+if TYPE_CHECKING:
+    from ..llm.base import LLMClient
 
 
 @dataclass
@@ -66,17 +69,18 @@ class Planner(Agent[Plan]):
     def __init__(
         self,
         *,
-        gemini: GeminiClient | None,
+        gemini: GeminiClient | None = None,
+        llm: LLMClient | None = None,
         settings: DirectorSettings,
     ) -> None:
-        super().__init__(gemini=gemini, settings=settings)
+        super().__init__(gemini=gemini, llm=llm, settings=settings)
 
     async def run(self, request: PlannerRequest) -> Plan:
-        if self._gemini is None:
+        if self._llm is None:
             # Deterministic offline plan for tests/CI.
             return _build_deterministic_plan(request)
         try:
-            return await self._gemini.generate_json(
+            return await self._llm.generate_json(
                 system=self.SYSTEM,
                 user=_user_prompt(request),
                 response_schema=Plan,
@@ -99,12 +103,12 @@ class Planner(Agent[Plan]):
         Used by the Director REPL. The Gemini path returns a structured Plan;
         the offline fallback returns a no-op plan with an injected rationale.
         """
-        if self._gemini is None:
+        if self._llm is None:
             return _offline_interpret_plan(
                 instruction, timeline_state, target_project, target_timeline
             )
         try:
-            return await self._gemini.generate_json(
+            return await self._llm.generate_json(
                 system=self.INTERPRET_SYSTEM,
                 user=_interpret_user_prompt(
                     instruction=instruction,
@@ -127,19 +131,23 @@ def _build_deterministic_plan(req: PlannerRequest) -> Plan:
     if not beats:
         beats = [float(i * 2.0) for i in range(max(1, len(req.per_clip)))]
     cursor = 0.0
-    for clip_idx, clip in enumerate(req.per_clip):
+    for append_index, clip in enumerate(req.per_clip):
         # Use beat "closest to" the next position; default slice = 2s if beats are scarce.
-        target_beat = beats[min(clip_idx, len(beats) - 1)]
+        target_beat = beats[min(append_index, len(beats) - 1)]
         duration = _slice_for_clip(clip, fallback_seconds=2.0)
+        symbol = f"<item:{append_index}>"
         ops.append(
             PlanOp(
                 id=f"op_{uuid.uuid4().hex[:8]}",
                 kind=PlanOpKind.APPEND_CLIP,
                 args={
                     "media_clip_id": clip.clip_id,
-                    "timeline_track_index": 0,
+                    "timeline_track_index": 1,
                     "start_seconds": cursor,
                     "duration_seconds": duration,
+                    # Symbolic placeholder so the Editor can bind later ops
+                    # (<item:N>) to the real timeline-item id after the append.
+                    "__symbolic_id__": symbol,
                 },
                 rationale=(
                     f"Place {clip.clip_id or 'clip'} at beat {target_beat:.2f}s "
@@ -153,7 +161,7 @@ def _build_deterministic_plan(req: PlannerRequest) -> Plan:
                     id=f"op_{uuid.uuid4().hex[:8]}",
                     kind=PlanOpKind.ADD_FADE,
                     args={
-                        "timeline_item_id": "<item:0>",
+                        "timeline_item_id": symbol,
                         "fade_in_seconds": 0.15,
                         "fade_out_seconds": 0.2,
                     },
@@ -161,6 +169,7 @@ def _build_deterministic_plan(req: PlannerRequest) -> Plan:
                 )
             )
         cursor += duration
+        append_index += 1
     return Plan(
         plan_id=f"plan_{uuid.uuid4().hex[:8]}",
         version=1,

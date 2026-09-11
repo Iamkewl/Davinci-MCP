@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from resolve_mcp.backend import ResolveUnavailableError
 from resolve_mcp.davinci_backend import DaVinciResolveBackend
 
 # Imports the harness helpers
@@ -45,7 +46,7 @@ def test_live_save_project_calls_resolve_save(live_backend: tuple) -> None:
     backend.create_project("reel", 24.0, 1920, 1080)
     log.reset()
     backend.save_project()
-    assert "Project.SaveProject" in log.methods_called()
+    assert "ProjectManager.SaveProject" in log.methods_called()
 
 
 def test_live_open_project_calls_load(live_backend: tuple) -> None:
@@ -94,7 +95,7 @@ def test_live_append_clip_calls_resolve(live_backend: tuple) -> None:
         duration_seconds=2.0,
     )
     assert delta.changed_paths
-    assert "Timeline.AppendItemsInTimeline" in log.methods_called()
+    assert "MediaPool.AppendToTimeline" in log.methods_called()
 
 
 def test_live_item_set_transform_calls_resolve(live_backend: tuple) -> None:
@@ -118,10 +119,12 @@ def test_live_item_add_fade_calls_resolve(live_backend: tuple) -> None:
     item_id = state.tracks[0].items[0].id
     log.reset()
     backend.add_fade(item_id, fade_in_seconds=0.2, fade_out_seconds=0.3)
-    assert any(
-        e["method"] == "TimelineItem.SetProperty" and e["args"][0] == "Ease"
-        for e in log.entries
-    )
+    fade_keys = {
+        entry["args"][0]
+        for entry in log.entries
+        if entry["method"] == "TimelineItem.SetProperty"
+    }
+    assert {"FadeInStart", "FadeInEnd", "FadeOutStart", "FadeOutEnd"} <= fade_keys
 
 
 def test_live_item_set_opacity_calls_resolve(live_backend: tuple) -> None:
@@ -158,10 +161,8 @@ def test_live_add_transition_calls_resolve(live_backend: tuple) -> None:
     state = backend.get_timeline_state()
     item_id = state.tracks[0].items[0].id
     log.reset()
-    backend.add_transition(item_id, 1, "cross_dissolve", 0.5, "mid")
-    assert any(
-        e["method"] == "Timeline.AddTransition" for e in log.entries
-    )
+    with pytest.raises(ResolveUnavailableError):
+        backend.add_transition(item_id, 1, "cross_dissolve", 0.5, "mid")
 
 
 def test_live_render_job_lifecycle_calls_resolve(live_backend: tuple) -> None:
@@ -169,14 +170,16 @@ def test_live_render_job_lifecycle_calls_resolve(live_backend: tuple) -> None:
     backend.create_timeline("Timeline 1", 24.0)
     job = backend.add_render_job("Timeline 1", "mp4", "/tmp/out.mp4")
     assert job.id
+    assert "Project.AddRenderJob" in log.methods_called()
     log.reset()
     backend.start_render(job.id)
     assert any(
-        e["method"] == "Project.StartRendering" for e in log.entries
+        e["method"] == "Project.StartRendering" and e["args"][0] == job.id for e in log.entries
     )
     log.reset()
     status = backend.get_render_status(job.id)
     assert status.id == job.id
+    assert "Project.GetRenderJobStatus" in log.methods_called()
 
 
 def test_live_quit_requires_confirm(live_backend: tuple) -> None:
@@ -187,3 +190,84 @@ def test_live_quit_requires_confirm(live_backend: tuple) -> None:
     backend.quit_app(confirm=True)
     assert fake._quit_called is True
     assert "Resolve.Quit" in log.methods_called()
+
+
+# Only these method names exist in the documented Resolve scripting API.
+# Any call outside this list is fiction the harness would happily satisfy;
+# keep it updated against .opencode/skills/davinci-mcp-dev/SKILL.md.
+DOCUMENTED_API = frozenset(
+    {
+        "scriptapp",
+        "Resolve.GetProjectManager",
+        "Resolve.Quit",
+        "ProjectManager.CreateProject",
+        "ProjectManager.LoadProject",
+        "ProjectManager.SaveProject",
+        "ProjectManager.GetCurrentProject",
+        "ProjectManager.GetProjectListInCurrentFolder",
+        "Project.GetName",
+        "Project.GetSetting",
+        "Project.SetSetting",
+        "Project.GetMediaPool",
+        "Project.GetCurrentTimeline",
+        "Project.GetTimelineCount",
+        "Project.GetTimelineByIndex",
+        "Project.SetCurrentTimeline",
+        "Project.SetRenderSettings",
+        "Project.AddRenderJob",
+        "Project.StartRendering",
+        "Project.GetRenderJobList",
+        "Project.GetRenderJobStatus",
+        "MediaPool.GetRootFolder",
+        "MediaPool.AddSubFolder",
+        "MediaPool.SetCurrentFolder",
+        "MediaPool.ImportMedia",
+        "MediaPool.CreateEmptyTimeline",
+        "MediaPool.AppendToTimeline",
+        "MediaPool.DeleteClips",
+        "MediaPool.DeleteTimelines",
+        "Folder.GetName",
+        "Folder.GetClipList",
+        "Folder.GetSubFolderList",
+        "PoolItem.GetName",
+        "PoolItem.GetClipProperty",
+        "Timeline.GetName",
+        "Timeline.GetSetting",
+        "Timeline.SetSetting",
+        "Timeline.GetTrackCount",
+        "Timeline.GetItemListInTrack",
+        "TimelineItem.GetName",
+        "TimelineItem.GetStart",
+        "TimelineItem.GetDuration",
+        "TimelineItem.GetClipProperty",
+        "TimelineItem.GetMediaPoolItem",
+        "TimelineItem.GetSourceStartFrame",
+        "TimelineItem.GetSourceEndFrame",
+        "TimelineItem.SetProperty",
+        "TimelineItem.AddMarker",
+        "TimelineItem.Delete",
+    }
+)
+
+
+def test_calls_only_documented_api(live_backend: tuple) -> None:
+    """Every fictional call the harness models must also exist in the API docs."""
+    backend, _fake, log = live_backend
+    backend.create_project("reel", 24.0, 1920, 1080)
+    backend.import_media(["/foo/a.mp4"])
+    backend.create_timeline("cut", 24.0)
+    backend.get_timeline_state()
+    clips = backend.list_media_pool().clips
+    if clips:
+        delta = backend.append_clip(
+            clips[0].id, timeline_track_index=1, start_seconds=0.0, duration_seconds=1.0
+        )
+        first_item = delta.after["tracks"][0]["items"][0]
+        backend.set_opacity(first_item["id"], 0.8)
+        with pytest.raises(ResolveUnavailableError):
+            backend.add_transition(first_item["id"], 1, "cross_dissolve", 0.5, "mid")
+    job = backend.add_render_job("cut", "mp4", "/tmp/out.mp4")
+    backend.start_render(job.id)
+    backend.get_render_status(job.id)
+    invent = [n for n in set(log.methods_called()) - DOCUMENTED_API if "." in n]
+    assert not invent, f"Backend calls undocumentad Resolve API: {sorted(invent)}"

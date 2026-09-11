@@ -48,7 +48,7 @@ def test_cli_auto_runs_to_completion(
     clips_dir.mkdir()
     (clips_dir / "a.mp4").write_bytes(b"x")
     (clips_dir / "b.mp4").write_bytes(b"x")
-    monkeypatch.setenv("DIRECTOR_RUN_STORE", str(tmp_path / "runs"))
+    monkeypatch.setenv("DIRECTOR_RUN_STORE_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("DIRECTOR_GEMINI_API_KEY", "")
     result = runner.invoke(
         app,
@@ -92,7 +92,7 @@ def test_cli_auto_runs_to_completion(
 
 
 def test_cli_run_list_empty(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DIRECTOR_RUN_STORE", str(tmp_path / "runs"))
+    monkeypatch.setenv("DIRECTOR_RUN_STORE_DIR", str(tmp_path / "runs"))
     runner = CliRunner()
     result = runner.invoke(app, ["run", "list"])
     assert result.exit_code == 0

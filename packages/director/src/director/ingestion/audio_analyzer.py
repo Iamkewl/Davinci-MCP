@@ -11,6 +11,9 @@ Everything is deterministic for fixed inputs.
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
 import numpy as np
 
 from ..schemas import PerClipMap
@@ -53,14 +56,13 @@ class TrackAnalysis:
         )
 
 
-# Force librosa to use soundfile. Imported eagerly so the choice is locked before
-# any librosa.load() call.
+# librosa is imported eagerly so availability is locked before any analysis call;
+# _load_audio_via_soundfile() below forces the soundfile decode backend.
 try:
+    import librosa  # noqa: F401  availability probe; call sites re-import locally
 
-    # librosa 0.10 took a ``sr`` already-loaded numpy path; for path input it
-    # uses audioread by default. We force soundfile inline below.
     _HAS_LIBROSA = True
-except Exception:  # pragma: no cover — handled at call site
+except ImportError:  # pragma: no cover — environment-dependent
     _HAS_LIBROSA = False
 
 
@@ -80,6 +82,12 @@ def _load_audio_via_soundfile(path: str, sr: int | None = None) -> tuple[np.ndar
         audio = _lb.resample(audio, orig_sr=file_sr, target_sr=sr)
         file_sr = sr
     return audio, int(file_sr)
+
+
+def _as_scalar(value: Any) -> float:
+    """Coerce possibly-array librosa output (e.g. a 1-element tempo ndarray) to a plain float."""
+    arr = np.asarray(value, dtype=np.float64).ravel()
+    return float(arr[0]) if arr.size else 0.0
 
 
 def analyze_track(
@@ -106,6 +114,9 @@ def analyze_track(
     if not _HAS_LIBROSA:
         msg = "librosa is not installed; cannot analyze audio"
         raise RuntimeError(msg)
+    if not os.path.isfile(path):
+        msg = f"no such audio file: {path}"
+        raise FileNotFoundError(msg)
     import librosa as _lb
 
     audio, effective_sr = _load_audio_via_soundfile(path, sr=sr)
@@ -130,7 +141,7 @@ def analyze_track(
         start_bpm=120.0,
     )
     return TrackAnalysis(
-        bpm=float(tempo),
+        bpm=_as_scalar(tempo),
         beat_times=np.asarray(beat_frames, dtype=np.float64),
         onset_times=np.asarray(onset_frames, dtype=np.float64),
         onset_strength=onset_strength,

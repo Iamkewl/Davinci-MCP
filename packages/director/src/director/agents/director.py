@@ -17,6 +17,7 @@ the latest verdict and exits with status ``failed``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -24,6 +25,9 @@ from ..ingestion.gemini_client import GeminiClient, GeminiError
 from ..schemas import DirectorAxisScore, DirectorEvaluation, DirectorVerdict, Plan
 from ..settings import DirectorSettings
 from .base import Agent, InvalidModelOutput
+
+if TYPE_CHECKING:
+    from ..llm.base import LLMClient
 
 
 @dataclass
@@ -49,10 +53,11 @@ class Director(Agent[DirectorOutcome]):
     def __init__(
         self,
         *,
-        gemini: GeminiClient | None,
+        gemini: GeminiClient | None = None,
+        llm: LLMClient | None = None,
         settings: DirectorSettings,
     ) -> None:
-        super().__init__(gemini=gemini, settings=settings)
+        super().__init__(gemini=gemini, llm=llm, settings=settings)
 
     async def run(
         self,
@@ -61,11 +66,11 @@ class Director(Agent[DirectorOutcome]):
         user_prompt: str,
         beat_count: int,
     ) -> DirectorOutcome:
-        if self._gemini is None:
+        if self._llm is None:
             evaluation = _offline_evaluation(plan, beat_count, self._settings)
         else:
             try:
-                evaluation = await self._gemini.generate_json(
+                evaluation = await self._llm.generate_json(
                     system=self.SYSTEM,
                     user=_build_user(plan, user_prompt, beat_count),
                     response_schema=DirectorEvaluation,
