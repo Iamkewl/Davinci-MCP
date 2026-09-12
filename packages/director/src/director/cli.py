@@ -253,7 +253,6 @@ async def _interactive_async(
     )
 
     try:
-        target_project = project or await _current_project_name(client) or "interactive-reel"
         target_timeline = timeline
         if from_run:
             # Rebuild a previous run's cut here first, so there is something to refine.
@@ -270,9 +269,25 @@ async def _interactive_async(
                 f"rebuilt run {from_run} onto {rebuilt.target_timeline!r} "
                 f"({rebuilt.timeline_summary['items']} items)"
             )
+        # Resolve the project AFTER any rebuild, so we point at the project the
+        # rebuilt cut actually landed in.
+        target_project = project or await _current_project_name(client)
+        if target_project is None:
+            typer.echo(
+                "no project is open. Build a cut first (director auto ...) and refine it "
+                "with --from-run <run id>, or open a project in Resolve.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         if target_timeline is None:
             state = await _current_timeline_name(client)
-            target_timeline = state or "Interactive"
+            if state is None:
+                typer.echo(
+                    "no timeline is open in that project; pass --timeline or --from-run.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            target_timeline = state
 
         session = InteractiveSession(
             settings=settings,

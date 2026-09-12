@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP-client orchestrator: Contextualizer -> Planner <-> Director -> Editor. Gemini + librosa."
 requires-python = ">=3.11"
 dependencies = [
-    "google-genai>=0.3,<1",
+    "google-genai>=1.0,<2",
     "librosa>=0.10,<1",
     "openai>=1.60,<3",
     "soundfile>=0.12,<1",

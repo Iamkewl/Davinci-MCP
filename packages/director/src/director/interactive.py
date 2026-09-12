@@ -195,6 +195,7 @@ class InteractiveSession:
             run_id=self.run_id,
             plan=plan,
             iteration=plan.version,
+            bootstrap=False,  # refine what is open; never create a project here
         )
         self._applied_any = self._applied_any or edit_result.applied_count > 0
         return InterpretResult(instruction, plan, edit_result, director_outcome, True)
@@ -243,7 +244,9 @@ async def run_repl(
 
             result = await session.interpret(cmd)
             printer(json.dumps(_report(result), indent=2))
-            if result.verdict.evaluation.verdict == DirectorVerdict.FAILED:
+            # An instruction we could not parse is not a rejected edit — keep the
+            # session alive. Only a real plan the director failed stops the loop.
+            if result.plan.ops and result.verdict.evaluation.verdict == DirectorVerdict.FAILED:
                 printer("director verdict = FAILED. stopping.")
                 return
     finally:

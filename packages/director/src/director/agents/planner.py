@@ -254,23 +254,31 @@ def build_deterministic_plan(req: PlannerRequest) -> Plan:
 
     ops: list[PlanOp] = []
     appended: list[tuple[str, _Segment]] = []  # (symbol, segment) in plan order
+    # Derive each shot's length from the NEXT shot's rounded start, so the numbers
+    # that leave the planner tile the timeline exactly; rounding start and duration
+    # independently leaves millisecond holes between shots.
+    edges = [round(segment.start, 3) for segment, *_ in assignments] + [round(total, 3)]
     for index, (segment, clip, source_in, duration) in enumerate(assignments):
         symbol = f"<item:{index}>"
+        start = edges[index]
+        tiled = round(edges[index + 1] - start, 3)
+        # A shot the source could not fill stays short (and the gap is real).
+        emitted = tiled if abs(duration - segment.duration) < 1e-6 else round(duration, 3)
         ops.append(
             _op(
                 PlanOpKind.APPEND_CLIP,
                 {
                     "media_clip_id": clip.clip_id,
                     "timeline_track_index": VIDEO_TRACK,
-                    "start_seconds": round(segment.start, 3),
-                    "duration_seconds": round(duration, 3),
+                    "start_seconds": start,
+                    "duration_seconds": emitted,
                     "source_in_seconds": round(source_in, 3),
                     "__symbolic_id__": symbol,
                 },
                 _cut_rationale(segment, beats),
             )
         )
-        appended.append((symbol, _Segment(segment.start, duration)))
+        appended.append((symbol, _Segment(start, emitted)))
 
     music_symbol: str | None = None
     if req.music_path and req.can_use("append_clip") and total > 0:
@@ -345,8 +353,17 @@ def _segments(
     segments: list[_Segment] = []
     for start, end in pairwise(boundaries):
         duration = round(end - start, 4)
-        if duration >= MIN_SEGMENT_SECONDS:
-            segments.append(_Segment(start=round(start, 4), duration=duration))
+        if duration <= 0:
+            continue
+        if duration < MIN_SEGMENT_SECONDS and segments:
+            # Absorb a sliver into the previous shot rather than dropping it,
+            # which would leave a hole in the timeline.
+            previous = segments[-1]
+            segments[-1] = _Segment(
+                start=previous.start, duration=round(previous.duration + duration, 4)
+            )
+            continue
+        segments.append(_Segment(start=round(start, 4), duration=duration))
     if not segments and total > 0:
         segments.append(_Segment(start=0.0, duration=total))
     return segments

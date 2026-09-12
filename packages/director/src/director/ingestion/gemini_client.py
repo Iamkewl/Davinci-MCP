@@ -12,9 +12,12 @@ Two responsibilities:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
-from collections.abc import Awaitable
+import time
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -27,6 +30,11 @@ T = TypeVar("T", bound=BaseModel)
 
 class GeminiError(RuntimeError):
     """Raised when the Gemini call fails in some non-recoverable way."""
+
+
+#: How long to wait for an uploaded video to finish processing before giving up.
+UPLOAD_ACTIVE_TIMEOUT_SECONDS = 180.0
+UPLOAD_POLL_SECONDS = 2.0
 
 
 class GeminiClient:
@@ -58,7 +66,7 @@ class GeminiClient:
             msg = "GEMINI_API_KEY is not set; cannot call Gemini"
             raise GeminiError(msg)
         try:
-            import google.genai as genai  # type: ignore[import-not-found]
+            import google.genai as genai
         except Exception as exc:
             msg = "google-genai is not installed; install director[gemini] or the dev extra"
             raise GeminiError(msg) from exc
@@ -97,12 +105,15 @@ class GeminiClient:
                     contents=prompt_full,
                     config={
                         "response_mime_type": "application/json",
-                        "response_schema": response_schema.model_json_schema(),
+                        # The SDK converts a pydantic class into Gemini's own schema
+                        # dialect. Handing it model_json_schema() instead ships
+                        # $defs/$ref, which the API rejects for every nested model.
+                        "response_schema": response_schema,
                     },
                 )
             )
-        except Exception as exc:  # pragma: no cover
-            raise GeminiError(str(exc)) from exc
+        except Exception as exc:
+            raise GeminiError(self._explain(exc, chosen_model)) from exc
         text = self._extract_text(response)
         try:
             payload = json.loads(text)
@@ -132,7 +143,8 @@ class GeminiClient:
         if not os.path.exists(clip_path):
             msg = f"clip not found on disk: {clip_path}"
             raise GeminiError(msg)
-        # Upload
+        # Upload, then wait: a freshly uploaded video is PROCESSING and cannot be
+        # referenced until the File API reports ACTIVE.
         try:
             uploaded = await self._call_async(
                 lambda: client.aio.files.upload(file=clip_path)
@@ -140,21 +152,24 @@ class GeminiClient:
         except Exception as exc:
             raise GeminiError(f"upload failed: {exc}") from exc
         try:
+            uploaded = await self._await_active(client, uploaded)
             response = await self._call_async(
                 lambda: client.aio.models.generate_content(
                     model=chosen_model,
-                    contents=[
-                        uploaded,
-                        prompt,
-                    ],
+                    contents=[uploaded, prompt],
                     config={
                         "response_mime_type": "application/json",
-                        "response_schema": PerClipMap.model_json_schema(),
+                        "response_schema": PerClipMap,
                     },
                 )
             )
+        except GeminiError:
+            await self._delete_uploaded(client, uploaded)
+            raise
         except Exception as exc:
-            raise GeminiError(f"vision analyze failed: {exc}") from exc
+            await self._delete_uploaded(client, uploaded)
+            raise GeminiError(f"vision analyze failed: {self._explain(exc, chosen_model)}") from exc
+        await self._delete_uploaded(client, uploaded)
         text = self._extract_text(response)
         try:
             payload = json.loads(text)
@@ -173,8 +188,53 @@ class GeminiClient:
 
     # ---- internal helpers ----
 
+    async def _await_active(self, client: Any, uploaded: Any) -> Any:
+        """Poll the File API until the upload is usable (or fails/expires)."""
+        name = getattr(uploaded, "name", None)
+        state = _state_name(uploaded)
+        if not name or state == "ACTIVE":
+            return uploaded
+        deadline = time.monotonic() + UPLOAD_ACTIVE_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if state == "FAILED":
+                raise GeminiError(f"Gemini could not process {name}: upload state FAILED")
+            if state == "ACTIVE":
+                return uploaded
+            await asyncio.sleep(UPLOAD_POLL_SECONDS)
+            try:
+                uploaded = await self._call_async(lambda: client.aio.files.get(name=name))
+            except Exception as exc:
+                raise GeminiError(f"could not read upload state for {name}: {exc}") from exc
+            state = _state_name(uploaded)
+        raise GeminiError(
+            f"upload {name} was still {state} after {UPLOAD_ACTIVE_TIMEOUT_SECONDS:.0f}s"
+        )
+
+    async def _delete_uploaded(self, client: Any, uploaded: Any) -> None:
+        """Best-effort cleanup so the Files namespace does not fill up."""
+        name = getattr(uploaded, "name", None)
+        if not name:
+            return
+        with contextlib.suppress(Exception):
+            await self._call_async(lambda: client.aio.files.delete(name=name))
+
+    def _explain(self, exc: Exception, model: str) -> str:
+        """Turn an SDK error into something the user can act on."""
+        text = str(exc)
+        if "not found" in text.lower() or "404" in text:
+            return (
+                f"model {model!r} is not available to this API key ({text}). "
+                "Set DIRECTOR_REASONING_MODEL / DIRECTOR_VISION_MODEL to a model your "
+                "key can use."
+            )
+        if "api key" in text.lower() or "permission" in text.lower() or "401" in text:
+            return f"Gemini rejected the credentials: {text}"
+        if "quota" in text.lower() or "429" in text or "resource_exhausted" in text.lower():
+            return f"Gemini quota/rate limit hit: {text}"
+        return text
+
     @staticmethod
-    async def _call_async(fetcher: Awaitable[Any] | Any) -> Any:
+    async def _call_async(fetcher: Callable[[], Any]) -> Any:
         """Await either an awaitable callback or the returned value."""
         # The SDK's `generate_content` returns an awaitable when using `aio.models`.
         result = fetcher()
@@ -188,14 +248,23 @@ class GeminiClient:
 
         text = getattr(response, "text", None)
         if text:
-            return text
+            return str(text)
         # Fall back to candidates if .text isn't populated (some configs).
         for cand in getattr(response, "candidates", []) or []:
             for part in getattr(cand.content, "parts", []) or []:
-                if getattr(part, "text", None):
-                    return part.text  # type: ignore[no-any-return]
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    return str(part_text)
         msg = "Gemini response had no text payload"
         raise GeminiError(msg)
+
+
+def _state_name(uploaded: Any) -> str:
+    """File state across SDK shapes: an enum, an object with .name, or a string."""
+    state = getattr(uploaded, "state", None)
+    if state is None:
+        return "UNKNOWN"
+    return str(getattr(state, "name", state)).upper()
 
 
 # --- Placeholder factory ---------------------------------------------------------

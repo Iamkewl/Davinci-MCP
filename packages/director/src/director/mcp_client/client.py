@@ -17,13 +17,14 @@ import importlib.util
 import os
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import AnyUrl
 
 
 def _build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -123,7 +124,7 @@ class StdioResolveClient(ResolveClient):
         read, write = await self._cm.__aenter__()
         self._session_cm = ClientSession(read, write)
         self._session = await self._session_cm.__aenter__()
-        await self._session.initialize()  # type: ignore[union-attr]
+        await self._session.initialize()
 
     async def close(self) -> None:
         if self._session_cm is not None:
@@ -151,8 +152,9 @@ class StdioResolveClient(ResolveClient):
             raise ToolCallError(name=name, message=detail)
         # The SDK returns a CallToolResult containing a `content` list of TextContent
         # and optional `structuredContent`.
-        if getattr(result, "structuredContent", None):
-            return dict(result.structuredContent)
+        structured = getattr(result, "structuredContent", None)
+        if structured:
+            return dict(structured)
         # Fall back to parsing the text payload.
         for part in result.content or []:
             text = getattr(part, "text", None)
@@ -160,16 +162,19 @@ class StdioResolveClient(ResolveClient):
                 import json
 
                 try:
-                    return json.loads(text)
+                    parsed: Any = json.loads(text)
                 except json.JSONDecodeError:
                     return {"raw_text": text}
+                return parsed if isinstance(parsed, dict) else {"result": parsed}
         return {}
 
     async def read_resource(self, uri: str) -> str:
         if self._session is None:
             msg = "StdioResolveClient.start() was not awaited"
             raise RuntimeError(msg)
-        result = await self._session.read_resource(uri)
+        # The SDK types this as AnyUrl; passing a bare str is an API misuse that
+        # only shows up when the URL needs parsing.
+        result = await self._session.read_resource(AnyUrl(uri))
         # Concatenate text of returned contents.
         parts: list[str] = []
         for r in result.contents or []:
@@ -392,7 +397,7 @@ async def open_stdio_client(
     allow_destructive: bool = False,
     log_level: str = "WARNING",
     uv_project: str | None = None,
-) -> Awaitable[Any]:
+) -> AsyncIterator[StdioResolveClient]:
     """Async context manager wrapper used by the CLI."""
     client = StdioResolveClient.default(
         backend=backend,

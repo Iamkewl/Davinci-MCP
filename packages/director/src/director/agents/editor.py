@@ -119,15 +119,22 @@ class Editor(Agent[EditResult]):
         per_clip: list[PerClipMap] | None = None,
         extra_media: list[str] | None = None,
         target_fps: float = 24.0,
+        bootstrap: bool = True,
     ) -> EditResult:
+        """Apply ``plan``.
+
+        ``bootstrap`` creates/opens the plan's project and timeline first, which is
+        what auto and resume want. A refine session passes ``False``: it is editing
+        a timeline the caller already selected, and creating anything there would
+        silently move the work to a different project.
+        """
         result = EditResult(iteration=iteration)
         tools = await self.available_tools()
-        # Project + timeline must exist and be current before we touch items, and
-        # every media source the plan references must be in the pool before appends.
         try:
-            await self._ensure_project_and_timeline(
-                plan.target_project, plan.target_timeline, target_fps, result
-            )
+            if bootstrap:
+                await self._ensure_project_and_timeline(
+                    plan.target_project, plan.target_timeline, target_fps, result
+                )
             media_id_map, media_durations = await self._ensure_media_imported(per_clip, extra_media)
         except Exception as err:
             result.errors.append(str(err))

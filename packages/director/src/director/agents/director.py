@@ -50,6 +50,10 @@ __all__ = ["Director", "DirectorOutcome", "PlanContext"]
 #: A cut counts as "on the beat" within this distance (about half a frame at 24fps).
 BEAT_TOLERANCE_SECONDS = 0.05
 
+#: Shots closer than this count as contiguous — below one frame at 24fps, so
+#: millisecond rounding in a client's numbers is not reported as a hole.
+GAP_TOLERANCE_SECONDS = 0.021
+
 _DESTRUCTIVE_KINDS = {PlanOpKind.DELETE_CLIP}
 
 
@@ -287,7 +291,7 @@ def _coverage(video_ops: Sequence[PlanOp]) -> tuple[float, list[tuple[float, flo
     previous_end = 0.0
     for start, end in spans:
         covered += max(0.0, end - start)
-        if start > previous_end + 1e-3:
+        if start > previous_end + GAP_TOLERANCE_SECONDS:
             gaps.append((previous_end, start))
         previous_end = max(previous_end, end)
     return covered, gaps

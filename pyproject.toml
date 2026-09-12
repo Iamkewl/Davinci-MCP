@@ -9,8 +9,8 @@ dependencies = []
 [tool.uv.workspace]
 members = ["packages/resolve-mcp", "packages/director"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<1",
     "ruff>=0.7,<1",
@@ -55,7 +55,6 @@ module = [
     "director.cli",
 ]
 disallow_untyped_defs = false
-ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["packages/resolve-mcp/tests", "packages/director/tests"]

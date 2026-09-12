@@ -165,7 +165,10 @@ def _parse(text: str, items: list[_Item]) -> tuple[list[PlanOp], str]:
         return ops, f"zoom {_names(targets)} to {zoom:.2f}x"
 
     # rotate
-    rotate = re.search(rf"\brotate\b[^\d-]*(-?{_NUMBER})", text)
+    # "rotate clip 2 by -15": the clip number must not be read as the angle.
+    rotate = re.search(rf"\brotate\b.*?\bby\s+(-?{_NUMBER})", text) or re.search(
+        rf"\brotate\s+(-?{_NUMBER})", text
+    )
     if rotate:
         degrees = max(-360.0, min(360.0, float(rotate.group(1))))
         for it in targets:
@@ -187,10 +190,14 @@ def _parse(text: str, items: list[_Item]) -> tuple[list[PlanOp], str]:
 
     # blend mode
     blend = re.search(
-        r"\b(?:blend|composite)(?:\s+mode)?\s+(?:to\s+)?([a-z_ ]+)", text
+        r"\b(?:blend|composite)(?:\s+mode)?\s+(?:to\s+)?"
+        r"(normal|add|subtract|difference|multiply|screen|overlay|hard[ _-]?light|"
+        r"soft[ _-]?light|darken|lighten|color[ _-]?dodge|color[ _-]?burn|exclusion|"
+        r"hue|saturation|color|luminosity)\b",
+        text,
     )
     if blend:
-        mode = blend.group(1).strip().replace(" ", "_")
+        mode = re.sub(r"[ -]", "_", blend.group(1).strip())
         for it in targets:
             ops.append(
                 _op(
@@ -235,13 +242,21 @@ def _flatten_items(timeline_state: dict[str, Any]) -> list[_Item]:
     if not isinstance(tracks, list):
         return flat
     raw: list[tuple[int, dict[str, Any]]] = []
+    video_only: list[tuple[int, dict[str, Any]]] = []
     for track in tracks:
         if not isinstance(track, dict):
             continue
         index = track.get("index")
+        track_index = int(index) if isinstance(index, int) else 1
         for item in track.get("items") or []:
             if isinstance(item, dict) and isinstance(item.get("id"), str):
-                raw.append((int(index) if isinstance(index, int) else 1, item))
+                raw.append((track_index, item))
+                if track.get("kind", "video") == "video":
+                    video_only.append((track_index, item))
+    # "clip 2" means the second picture clip; the music bed shares start 0.0 and
+    # would otherwise steal the numbering.
+    if video_only:
+        raw = video_only
     raw.sort(key=lambda pair: (float(pair[1].get("start_seconds") or 0.0), pair[0]))
     for position, (track_index, item) in enumerate(raw, start=1):
         flat.append(

@@ -317,8 +317,12 @@ class FakeResolveBackend:
                 msg = f"duration_seconds must be > 0, got {duration_seconds}"
                 raise InvalidStateError(msg)
             conv = TimeConverter(tl.frame_rate)
+            # Snap both ends of the span: rounding start and duration separately
+            # can push a shot one frame into the next one, turning a perfectly
+            # tiled edit into an overlap.
             start = self._quantize(conv, position_seconds)
-            duration = self._quantize(conv, duration_seconds)
+            end = self._quantize(conv, position_seconds + duration_seconds)
+            duration = round(end - start, 6)
             source_in = self._quantize(conv, source_in_seconds)
             if duration <= 0:
                 msg = (

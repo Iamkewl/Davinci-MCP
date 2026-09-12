@@ -767,8 +767,20 @@ class DaVinciResolveBackend:
         """
         media_fps = self._media_fps(pool_item)
         src_conv = TimeConverter(FrameRate(fps=media_fps, drop_frame=False)) if media_fps else self._converter_of(tl)
+        tl_conv = self._converter_of(tl)
+        # Snap BOTH ends of the timeline span: rounding the start and the duration
+        # separately can overlap the next shot by a frame, and Resolve then refuses
+        # the append.
+        start_offset = tl_conv.seconds_to_frames_round(start_seconds)
+        end_offset = tl_conv.seconds_to_frames_round(start_seconds + duration_seconds)
+        span_frames = max(1, end_offset - start_offset)
         start_frame_src = src_conv.seconds_to_frames_round(source_in_seconds)
-        end_frame_src = src_conv.seconds_to_frames_round(source_in_seconds + duration_seconds)
+        if media_fps and media_fps > 0:
+            tl_fps = tl_conv.fps_float or media_fps
+            source_span = max(1, round(span_frames * media_fps / tl_fps))
+        else:
+            source_span = span_frames
+        end_frame_src = start_frame_src + source_span
         media_duration_frames = self._media_duration_frames(pool_item)
         if media_duration_frames is not None and end_frame_src > media_duration_frames:
             msg = (
@@ -776,8 +788,7 @@ class DaVinciResolveBackend:
                 f"exceeds the media's own duration ({media_duration_frames} frames)"
             )
             raise InvalidStateError(msg)
-        tl_conv = self._converter_of(tl)
-        record_frame = self._start_frame(tl) + tl_conv.seconds_to_frames_round(start_seconds)
+        record_frame = self._start_frame(tl) + start_offset
         return {
             "mediaPoolItem": pool_item,
             "startFrame": start_frame_src,
