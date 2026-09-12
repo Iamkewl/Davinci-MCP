@@ -25,7 +25,7 @@ DaVinci-MCP is a **two-layer system**, split cleanly so each half does one job w
   │           director          │  MCP   │          resolve-mcp         │
   │  (the "brain" — MCP client) │ ─────► │   (the "hands" — MCP server) │
   │                             │ stdio  │                              │
-  │  • Gemini vision (clips)    │        │  • 28 typed tools            │
+  │  • vision analysis of clips │        │  • typed editing tools       │
   │  • librosa beat detection   │        │  • drives Resolve's API      │
   │  • plan → review → execute  │        │  • state-delta verification  │
   │  • SQLite + JSONL run store │        │  • fake backend for testing  │
@@ -34,33 +34,37 @@ DaVinci-MCP is a **two-layer system**, split cleanly so each half does one job w
 
 ### Layer 1 — `resolve-mcp` (the hands)
 
-A first-party MCP **server** that exposes DaVinci Resolve's scripting API as **28 individual, type-hinted tools** — one function per operation (`append_clip`, `set_transform`, `add_transition`, `add_render_job`, …) instead of a handful of overloaded string-dispatch tools. Every state-changing tool returns a snapshot of what changed, so the caller can *verify* an edit actually landed rather than hoping it did. Destructive operations (`quit_app`, `restart_app`, `delete_timeline`, `delete_media`) are gated behind an explicit `--allow-destructive` flag *and* a per-call confirmation.
+A first-party MCP **server** that exposes DaVinci Resolve's scripting API as individual, type-hinted tools — one function per operation (`append_clip`, `set_transform`, `add_marker`, `add_render_job`, …) instead of a handful of overloaded string-dispatch tools. Every state-changing tool returns a snapshot of what changed, so the caller can *verify* an edit landed rather than hoping it did.
 
-It ships with a **`FakeResolveBackend`** that models project/timeline state in memory — so you (and CI) can run and test the whole thing without DaVinci Resolve installed.
+**The tool list reflects what the backend can actually do.** Resolve's documented scripting API has no entry point for fades, retimes or transitions, so with `--backend davinci` those tools are not advertised at all: a client sees 24 tools (27 with `--allow-destructive`) instead of the fake backend's 27 (31 with destructive ops). Nothing pretends to succeed.
+
+It ships with a **`FakeResolveBackend`** that models project/timeline state in memory — so you (and CI) can run and test the whole thing without DaVinci Resolve installed. It behaves like an NLE, not a stub: state is scoped per project, positions snap to the frame grid, media is probed with `ffprobe`, files that don't exist can't be imported, and clips can't silently overlap.
 
 ### Layer 2 — `director` (the brain)
 
 An MCP **client** and agent orchestrator that runs the creative pipeline:
 
-1. **Contextualize** — Google Gemini analyzes each clip to understand what's in it.
+1. **Contextualize** — every clip is probed for its real duration/frame rate, and (with an API key) a vision model describes what's in it.
 2. **Listen** — `librosa` detects tempo, beats, and onsets in your music.
-3. **Plan → Review** — a planner drafts a beat-synced timeline; a director critiques it and returns an honest verdict: `APPROVED`, `ACCEPTED_WITH_WARNINGS`, or `FAILED` (no silent rubber-stamping).
-4. **Execute** — the approved plan is built in Resolve via `resolve-mcp`, one verified edit at a time.
+3. **Plan → Review** — a planner drafts a beat-synced timeline; a reviewer scores what the plan actually does — where each cut lands relative to the beats, whether the timeline is covered, whether it fits the brief — and returns `APPROVED`, `ACCEPTED_WITH_WARNINGS` or `FAILED`. Its issues are fed back into the next planning pass.
+4. **Execute** — the plan is checked for structural problems (unknown arguments, out-of-range source ranges, overlapping shots) *before* anything is executed, then built one verified edit at a time.
 
-Every run is recorded to a **SQLite + JSONL run store** so you can inspect exactly what happened — and resume it later.
+Every run is recorded to a **SQLite + JSONL run store** so you can inspect exactly what happened — and rebuild it later.
 
 ---
 
 ## Features
 
 - 🎬 **Clips + music → finished timeline**, automatically.
-- 🧩 **28 typed MCP tools** covering projects, media, timelines, effects, and rendering.
-- ✅ **Verified edits** — mutations return state deltas; no silent failures.
-- 🔎 **Honest reviews** — the director says when a cut isn't good enough.
-- 💾 **Inspectable, resumable runs** — full history in SQLite + JSONL.
-- 🛡️ **Safe by default** — destructive ops are double-gated.
-- 🧪 **Runs without Resolve** — fake backend + a deterministic offline mode for testing.
-- 💬 **Interactive mode** — refine the cut conversationally, not just one-shot.
+- 🥁 **Genuinely beat-synced** — cuts land on detected beats (sub-frame), the music is laid under the picture, and shot length follows the brief's energy.
+- 🧩 **Typed MCP tools** covering projects, media, timelines, effects, and rendering, with enums and bounds in the schema so any MCP client can discover legal values.
+- ✅ **Verified edits** — mutations return before/after state deltas; no silent failures.
+- 🔎 **Honest reviews** — the reviewer scores the plan's real geometry, and a structurally invalid plan can never be approved.
+- 🙅 **Honest limits** — what Resolve's API cannot do isn't offered (see [Limitations](#limitations)).
+- 💾 **Inspectable runs** — full history in SQLite + JSONL; `resume` rebuilds an agreed cut on its own timeline.
+- 🛡️ **Safe by default** — destructive ops need a server flag *and* a per-call confirmation.
+- 🧪 **Runs without Resolve** — fake backend + a fully offline `--fast` mode.
+- 💬 **Interactive mode** — refine the cut conversationally; offline it understands a fixed set of edit instructions and says so plainly when it doesn't understand.
 
 ---
 
@@ -68,11 +72,11 @@ Every run is recorded to a **SQLite + JSONL run store** so you can inspect exact
 
 - **Python 3.11+**
 - **[uv](https://docs.astral.sh/uv/)** (workspace & dependency manager)
-- **DaVinci Resolve Studio 18.5+** — *for real editing.* Studio only; the free edition has no external scripting. Enable it under **Preferences → General → External scripting using = Local**.
-- **A Gemini API key** — for the full pipeline (vision + planning). Not needed in `--fast`/offline mode.
-- **FFmpeg** on your PATH is recommended for broad audio format support.
+- **DaVinci Resolve Studio 18.5+** — *for real editing.* Studio only: the free edition has no external scripting. Enable it under **Preferences → General → External scripting using = Local**.
+- **An API key** — for vision + LLM planning (Gemini by default, or any OpenAI-compatible endpoint). Not needed in `--fast`/offline mode.
+- **FFmpeg** (`ffprobe`) on your PATH — used to read clip durations and frame rates. Without it, lengths are unknown and the planner is more conservative.
 
-> You can try everything below **without** Resolve or a Gemini key using the `fake` backend and `--fast` mode.
+> You can try everything below **without** Resolve and **without** an API key using the `fake` backend and `--fast` mode.
 
 ---
 
@@ -83,10 +87,11 @@ Every run is recorded to a **SQLite + JSONL run store** so you can inspect exact
 git clone https://github.com/Iamkewl/Davinci-MCP.git
 cd Davinci-MCP
 
-# 2. Install the workspace
-uv sync
+# 2. Install the workspace (--all-packages is required: a plain `uv sync`
+#    installs only the dev tools and neither package is importable)
+uv sync --all-extras --all-packages
 
-# 3. (Optional) add your Gemini key for the full pipeline
+# 3. (Optional) add your API key for the full pipeline
 cp .env.example .env
 #   then set GEMINI_API_KEY=... in .env
 
@@ -95,7 +100,7 @@ uv run director auto ./clips --music ./music.mp3 \
     --prompt "high-energy 30s reel" --fast
 ```
 
-`--fast` uses a deterministic planner/director (no Gemini) and the default `fake` backend (no Resolve), so it's the ideal way to see the flow before wiring up the real app.
+`--fast` uses the deterministic planner/reviewer (no model) and the default `fake` backend (no Resolve), so it's the ideal way to see the flow before wiring up the real app.
 
 ---
 
@@ -108,18 +113,23 @@ uv run director auto ./clips --music ./music.mp3 \
 uv run director auto ./clips -m ./music.mp3 -p "moody cinematic edit" --fast
 
 # The real thing: drive a running DaVinci Resolve Studio
-uv run director auto ./clips -m ./music.mp3 -p "moody cinematic edit" \
-    --backend davinci --uv-project packages/resolve-mcp
+uv run director auto ./clips -m ./music.mp3 -p "moody cinematic edit" --backend davinci
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `clips_dir` | Directory of source clips (positional) |
+| `clips_dir` | Directory of source clips (positional). Non-media files are skipped. |
 | `--music`, `-m` | Music track to sync to |
-| `--prompt`, `-p` | Your brief (default: `high-energy 30s reel`) |
+| `--prompt`, `-p` | Your brief (default: `high-energy 30s reel`). A length like "30s" or "1 minute" is honoured. |
 | `--backend` | `fake` (default) or `davinci` |
-| `--uv-project` | Path to `resolve-mcp` so director can launch the server |
-| `--fast` | Skip Gemini; deterministic planner/director |
+| `--project` | Resolve project to build in (default: the open one, else `auto-reel`) |
+| `--timeline` | Timeline name (default: a fresh `Reel <run id>`, so re-running never appends into an existing cut) |
+| `--fps` | Timeline frame rate (default: inferred from the clips) |
+| `--fast` | Skip the model entirely; deterministic planner + reviewer |
+| `--llm` | Provider override: `gemini`, `openai_compatible` or `none` |
+| `--uv-project` | Launch the server via `uv run --project DIR` instead of this interpreter |
+
+The command prints a JSON report: run id, status, the timeline it built (name, item count, duration), the reviewer's verdict with per-axis scores, how many operations were applied, and any errors or warnings.
 
 ### Choosing a model provider
 
@@ -134,23 +144,37 @@ DIRECTOR_REASONING_MODEL=anthropic/claude-sonnet-4.6
 DIRECTOR_VISION_MODEL=google/gemini-3-flash
 ```
 
-Per-run override: `--llm {gemini,openai_compatible,none}`. `--fast` always runs fully offline.
+Per-run override: `--llm {gemini,openai_compatible,none}`. `--fast` always runs fully offline. OpenAI-compatible endpoints have no video upload, so clips are sampled into keyframes with ffmpeg for the vision pass; without ffmpeg that step degrades to "no visual description" rather than failing the run.
 
 ### Interactive mode — refine conversationally
 
 ```bash
-uv run director interactive --fast
-# ...or against real Resolve:
-uv run director interactive --backend davinci --uv-project packages/resolve-mcp
+# rebuild a previous run's cut on a fresh timeline, then refine it
+uv run director interactive --fast --from-run <run_id>
+
+# or refine whatever is open in Resolve
+uv run director interactive --backend davinci
 ```
 
-### Inspect and resume runs
+With a model configured, instructions are free-form. Offline (`--fast`) it understands a fixed vocabulary — type `help` to see it:
+
+```
+fade in the first clip 1s     slow clip 2 to 0.5x        zoom clip 2 to 120%
+set opacity of clip 1 to 60%  mark clip 1 'hook' at 0.5s move clip 3 to 12s
+rotate clip 1 by 5            blend mode screen on clip 2  delete clip 4
+```
+
+Anything it can't parse is reported as such — it never invents an edit you didn't ask for.
+
+### Inspect and rebuild runs
 
 ```bash
 uv run director run list           # every run in the store
 uv run director run show <run_id>  # record, verdicts, and every tool call
-uv run director resume <run_id>    # re-execute the last agreed plan (rebuild the cut)
+uv run director resume <run_id>    # rebuild the agreed cut on its own timeline
 ```
+
+`resume` builds onto `"<original timeline> (resume N)"` rather than replaying into the existing timeline, so it can never collide with or duplicate work you already have.
 
 ### Use `resolve-mcp` from any MCP client
 
@@ -169,14 +193,48 @@ Example Claude Desktop entry:
   "mcpServers": {
     "davinci-resolve": {
       "command": "uv",
-      "args": ["run", "resolve-mcp", "--backend", "davinci"],
-      "cwd": "/path/to/Davinci-MCP/packages/resolve-mcp"
+      "args": ["run", "--project", "/path/to/Davinci-MCP", "resolve-mcp", "--backend", "davinci"]
     }
   }
 }
 ```
 
-Server flags: `--backend {fake,davinci}`, `--allow-destructive`, `--transport stdio`, `--log-level {DEBUG,INFO,WARNING,ERROR}`.
+Server flags: `--backend {fake,davinci}`, `--allow-destructive` / `--no-allow-destructive`, `--transport stdio`, `--log-level {DEBUG,INFO,WARNING,ERROR}`. Anything you leave off falls back to `RESOLVE_MCP_*` environment variables (or `.env`), then to the defaults. Logs always go to stderr; stdout carries only the protocol.
+
+**Conventions a client should know:**
+
+- Times are **seconds from the start of the timeline**; the backend snaps them to whole frames and reports the snapped value back.
+- Track indexes are **1-based across video tracks first, then audio** — on a fresh timeline `1` = V1 and `2` = A1. `get_timeline_state().tracks` lists the real mapping.
+- Transform/crop values use **Resolve's Inspector units**: pan and anchor in pixels from centre, zoom as a multiplier (`1.0` = 100%), rotation in degrees, crop in pixels.
+- Marker positions are relative to **the start of their item**.
+- Every mutating tool returns `before`/`after`/`changed_paths`, plus `id_remap` when an operation had to recreate an item.
+
+---
+
+## Resolve bootstrap
+
+Resolve's Python module lives inside the Resolve install. The server adds the standard location to `sys.path` automatically, so on a default install nothing is needed beyond enabling scripting. If Resolve lives somewhere custom, set these before launching the server:
+
+| Variable | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| `RESOLVE_SCRIPT_API` | `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting` | `%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting` | `/opt/resolve/Developer/Scripting` |
+| `RESOLVE_SCRIPT_LIB` | `/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so` | `C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll` | `/opt/resolve/libs/Fusion/fusionscript.so` |
+| `PYTHONPATH` | `$RESOLVE_SCRIPT_API/Modules/` | `%RESOLVE_SCRIPT_API%\Modules\` | `$RESOLVE_SCRIPT_API/Modules/` |
+
+Then: **Resolve → Preferences → General → External scripting using = Local**, and keep Resolve Studio running. The server connects lazily, so starting Resolve after the server is fine.
+
+---
+
+## Limitations
+
+Honest about what the platform allows:
+
+- **No fades, retimes or transitions on live Resolve.** The documented scripting API has no entry point for them, so `add_fade`, `set_speed` and `add_transition` exist only on the fake backend and are not advertised when you run `--backend davinci`. Apply them by hand in Resolve.
+- **Moving a clip recreates it.** There is no reposition API, so `move_clip` (and ripple `insert_clip`) delete and re-append the item: its id changes — the delta's `id_remap` tells you the new one — and colour grades or Fusion comps on that item are not carried over.
+- **Timeline item ids are per-session.** They come from Resolve's own `GetUniqueId()`, which is stable while the project is open, not across restarts.
+- **`restart_app` is fake-only.** Resolve can quit itself but cannot relaunch itself.
+- **The live path is documentation-verified, not yet hardware-verified.** Every live call is checked against Blackmagic's documented API by an offline harness modelled from that documentation, and the test suite fails if the backend calls anything outside it — but a manual smoke test on real Resolve Studio hardware is still pending. See `plan.md`.
+- **Vision quality depends on the provider.** Gemini analyses the video file itself; OpenAI-compatible endpoints get sampled keyframes.
 
 ---
 
@@ -186,9 +244,11 @@ Server flags: `--backend {fake,davinci}`, `--allow-destructive`, `--transport st
 Davinci-MCP/
 ├── packages/
 │   ├── resolve-mcp/     # Layer 1 — MCP server (mcp, pydantic, structlog)
-│   └── director/        # Layer 2 — orchestrator (google-genai, librosa, typer, …)
+│   └── director/        # Layer 2 — orchestrator (google-genai, openai, librosa, typer, …)
 ├── .env.example
+├── AGENTS.md            # working notes for AI agents in this repo
 ├── DECISIONS.md         # the "why" behind the key design choices
+├── plan.md              # remediation roadmap and its status
 ├── pyproject.toml       # uv workspace root
 └── uv.lock
 ```
@@ -196,13 +256,15 @@ Davinci-MCP/
 ## Development
 
 ```bash
-uv sync                 # install everything
-uv run pytest           # run the test suites (no Resolve required)
-uv run ruff check .     # lint
-uv run mypy .           # type-check (strict)
+uv sync --all-extras --all-packages                          # install everything
+uv run ruff check .                                          # lint
+uv run mypy packages/resolve-mcp/src packages/director/src   # type-check (strict, scoped)
+uv run pytest                                                # full suite, no Resolve or API key needed
 ```
 
-Tests run entirely against the fake backend and a record/replay harness, so CI never needs DaVinci Resolve or a Gemini key.
+The scoped mypy path is the canonical one — `mypy .` also walks the test tree, which is intentionally not strict-typed. CI runs exactly these three commands.
+
+Tests run entirely against the fake backend plus a harness modelled on Blackmagic's documented scripting API, so CI never needs DaVinci Resolve or an API key.
 
 ---
 
@@ -210,11 +272,9 @@ Tests run entirely against the fake backend and a record/replay harness, so CI n
 
 This project was built almost entirely by AI, and it's worth being clear about who did what:
 
-- **🏗️ Execution — [MiniMax M3](https://www.minimax.io/), served via [NVIDIA NIM](https://www.nvidia.com/en-us/ai/).** MiniMax M3 was the primary building model — it wrote essentially the entire codebase across both packages. Huge thanks to **NVIDIA NIM** for providing access to MiniMax and making the build possible.
-- **🧭 Planning — Claude Opus.** The initial architecture and project plan were drafted with Opus before a line of code was written.
-
----
+- **🏗️ Execution — [MiniMax M3](https://www.minimax.io/), served via [NVIDIA NIM](https://www.nvidia.com/en-us/ai/).** MiniMax M3 was the primary building model — it wrote essentially the entire first version across both packages. Huge thanks to **NVIDIA NIM** for providing access to MiniMax and making the build possible.
+- **🧭 Planning and remediation — Claude Opus.** The initial architecture was drafted with Opus, which later audited the build against Blackmagic's documentation and reworked the live backend, the planner and the review loop.
 
 ## License
 
-Open source. See [`LICENSE`](LICENSE) in the repository.
+Not yet chosen — see [plan.md](plan.md). Until a `LICENSE` file lands, all rights are reserved by the author.
