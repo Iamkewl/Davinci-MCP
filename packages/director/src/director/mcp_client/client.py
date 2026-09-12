@@ -13,7 +13,9 @@ For tests we substitute :class:`StubResolveClient` which talks directly to a
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
@@ -32,6 +34,9 @@ def _build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     children (they would build a fresh .venv, potentially on a slow mount).
     """
     return {**os.environ, **(extra or {})}
+
+
+DESTRUCTIVE_TOOLS = frozenset({"quit_app", "restart_app", "delete_timeline", "delete_media"})
 
 
 class ToolCallError(Exception):
@@ -84,25 +89,28 @@ class StdioResolveClient(ResolveClient):
         log_level: str = "WARNING",
         uv_project: str | None = None,
     ) -> StdioResolveClient:
-        """Default constructor: launches ``uv run resolve-mcp --backend X …``.
+        """Launch the resolve-mcp server the most reliable way available.
 
-        ``uv_project`` lets tests/dev override the working directory of the
-        workspace so the server can find the resolve-mcp package on disk.
+        Order of preference:
+
+        1. ``uv run --project <dir> resolve-mcp`` when ``uv_project`` is given
+           (explicit wins, and it works from any working directory);
+        2. ``<this interpreter> -m resolve_mcp`` when resolve-mcp is importable
+           here — no uv needed, no dependence on the caller's cwd or PATH, and it
+           guarantees the server runs in the same environment as the client;
+        3. ``uv run resolve-mcp`` as a last resort.
+
+        Preference 2 matters on Windows, where Resolve actually runs and ``uv``
+        is often not on PATH.
         """
-        cmd: list[str] = [
-            "uv",
-            "run",
-            "--project",
-            uv_project or ".",
-            "resolve-mcp",
-            "--backend",
-            backend,
-            "--log-level",
-            log_level,
-        ]
+        args = ["--backend", backend, "--log-level", log_level]
         if allow_destructive:
-            cmd.append("--allow-destructive")
-        return cls(server_command=cmd)
+            args.append("--allow-destructive")
+        if uv_project:
+            return cls(server_command=["uv", "run", "--project", uv_project, "resolve-mcp", *args])
+        if importlib.util.find_spec("resolve_mcp") is not None:
+            return cls(server_command=[sys.executable, "-m", "resolve_mcp", *args])
+        return cls(server_command=["uv", "run", "resolve-mcp", *args])
 
     async def start(self) -> None:
         """Open the stdio connection and the client session. Must be awaited first."""
@@ -189,6 +197,7 @@ class StubResolveClient(ResolveClient):
     """
 
     backend: Any  # FakeResolveBackend
+    allow_destructive: bool = False
 
     async def start(self) -> None:
         """No-op for the stub. Exists so the CLI path doesn't need a separate branch."""
@@ -214,7 +223,19 @@ class StubResolveClient(ResolveClient):
         raise KeyError(msg)
 
     async def list_tools(self) -> list[str]:
-        return sorted(_fake_dispatch_table(self.backend))
+        """Mirror what a real server would advertise for this backend.
+
+        Destructive tools only appear when they are enabled, and anything the
+        backend declares unsupported is hidden — same contract as server.py, so
+        callers that filter on list_tools behave identically in tests.
+        """
+        names = set(_fake_dispatch_table(self.backend))
+        if not self.allow_destructive:
+            names -= DESTRUCTIVE_TOOLS
+        unsupported = getattr(self.backend, "unsupported_tools", None)
+        if callable(unsupported):
+            names -= set(unsupported())
+        return sorted(names)
 
     async def close(self) -> None:  # nothing to do; backend lives in memory
         return None
@@ -261,6 +282,8 @@ def _fake_dispatch_table(be: Any) -> dict[str, Any]:
         import_media,
         insert_clip,
         list_media_pool,
+        list_projects,
+        list_timelines,
         move_clip,
         open_project,
         quit_app,
@@ -268,6 +291,7 @@ def _fake_dispatch_table(be: Any) -> dict[str, Any]:
         save_project,
         set_composite_mode,
         set_crop,
+        set_current_timeline,
         set_opacity,
         set_speed,
         set_transform,
@@ -281,12 +305,15 @@ def _fake_dispatch_table(be: Any) -> dict[str, Any]:
             width=a.get("width", 1920), height=a.get("height", 1080),
         ),
         "save_project": lambda a: save_project(be),
+        "list_projects": lambda a: list_projects(be),
         "get_project_info": lambda a: get_project_info(be),
         "import_media": lambda a: import_media(be, paths=a["paths"], bin=a.get("bin")),
         "list_media_pool": lambda a: list_media_pool(be),
         "create_bin": lambda a: create_bin(be, a["name"]),
         "create_timeline": lambda a: create_timeline(be, name=a["name"], fps=a["fps"], drop_frame=a.get("drop_frame", False)),
         "get_timeline_state": lambda a: get_timeline_state(be),
+        "list_timelines": lambda a: list_timelines(be),
+        "set_current_timeline": lambda a: set_current_timeline(be, a["name"]),
         "append_clip": lambda a: append_clip(
             be,
             media_clip_id=a["media_clip_id"],
@@ -347,6 +374,7 @@ def _fake_dispatch_table(be: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "DESTRUCTIVE_TOOLS",
     "ResolveClient",
     "StdioResolveClient",
     "StubResolveClient",

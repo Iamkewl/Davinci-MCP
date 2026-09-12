@@ -34,13 +34,14 @@ def _item_count(backend: FakeResolveBackend) -> int:
 
 async def test_resume_reexecutes_last_agreed_plan(
     tmp_run: tuple[RunStore, EventLog, pathlib.Path],
+    clips: list[str],
 ) -> None:
     store, log, _ = tmp_run
     backend = FakeResolveBackend()
     orch = _orchestrator(store, log, backend)
 
     first = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="reel",
     )
@@ -51,8 +52,13 @@ async def test_resume_reexecutes_last_agreed_plan(
     resumed = await orch.resume_run(run_id=first.run_id)
     assert isinstance(resumed, AutoResult)
     assert resumed.run_id == first.run_id
-    # The agreed plan was executed again against the same timeline.
-    assert _item_count(backend) > items_after_first
+    # The agreed cut is rebuilt on its own timeline, leaving the original intact.
+    assert resumed.target_timeline != first.target_timeline
+    assert _item_count(backend) == items_after_first
+    assert {t.name for t in backend.list_timelines()} == {
+        first.target_timeline,
+        resumed.target_timeline,
+    }
     assert resumed.iterations == first.iterations + 1
     record = store.get_run(first.run_id)
     assert record is not None
@@ -61,12 +67,13 @@ async def test_resume_reexecutes_last_agreed_plan(
 
 async def test_resume_without_plan_restarts_full_loop(
     tmp_run: tuple[RunStore, EventLog, pathlib.Path],
+    clips: list[str],
 ) -> None:
     store, log, _ = tmp_run
     backend = FakeResolveBackend()
     orch = _orchestrator(store, log, backend)
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"], music_path=None, user_prompt="x"
+        clip_paths=clips[:1], music_path=None, user_prompt="x"
     )
     # Simulate a run that never reached an executed plan.
     rec = store.get_run(result.run_id)
@@ -93,11 +100,12 @@ async def test_resume_unknown_run_raises(tmp_run: tuple[RunStore, EventLog, path
 
 async def test_resume_refuses_in_flight_run(
     tmp_run: tuple[RunStore, EventLog, pathlib.Path],
+    clips: list[str],
 ) -> None:
     store, log, _ = tmp_run
     orch = _orchestrator(store, log, FakeResolveBackend())
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"], music_path=None, user_prompt="x"
+        clip_paths=clips[:1], music_path=None, user_prompt="x"
     )
     rec = store.get_run(result.run_id)
     assert rec is not None

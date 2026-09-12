@@ -30,13 +30,15 @@ def _drive(input_lines: list[str]):
     return reader, printer, out
 
 
-async def test_repl_quits_cleanly(tmp_run: tuple[RunStore, EventLog, pathlib.Path]) -> None:
+async def test_repl_quits_cleanly(
+    tmp_run: tuple[RunStore, EventLog, pathlib.Path], clips: list[str]
+) -> None:
     store, log, _tmp = tmp_run
     backend = FakeResolveBackend(allow_destructive=True)
     client = StubResolveClient(backend)
     backend.create_project("interactive-reel", 24.0, 1920, 1080)
     backend.create_timeline("Timeline 1", 24.0)
-    backend.import_media(["/clips/a.mp4"])
+    backend.import_media(clips[:1])
     backend.append_clip(backend.list_media_pool().clips[0].id, 1, 0.0, 2.0)
 
     settings = DirectorSettings(gemini_api_key=None)
@@ -70,14 +72,16 @@ async def test_repl_quits_cleanly(tmp_run: tuple[RunStore, EventLog, pathlib.Pat
     assert "bye." in joined
 
 
-async def test_repl_interprets_instruction(tmp_run: tuple[RunStore, EventLog, pathlib.Path]) -> None:
+async def test_repl_interprets_instruction(
+    tmp_run: tuple[RunStore, EventLog, pathlib.Path], clips: list[str]
+) -> None:
     store, log, _tmp = tmp_run
     backend = FakeResolveBackend(allow_destructive=True)
     client = StubResolveClient(backend)
     backend.create_project("interactive-reel", 24.0, 1920, 1080)
     backend.create_timeline("Timeline 1", 24.0)
-    clips = backend.import_media(["/clips/a.mp4"])
-    backend.append_clip(clips[0].id, 1, 0.0, 2.0)
+    pool = backend.import_media(clips[:1])
+    backend.append_clip(pool[0].id, 1, 0.0, 2.0)
 
     settings = DirectorSettings(gemini_api_key=None)
     planner = Planner(gemini=None, settings=settings)
@@ -101,8 +105,10 @@ async def test_repl_interprets_instruction(tmp_run: tuple[RunStore, EventLog, pa
         target_project="interactive-reel",
         target_timeline="Timeline 1",
     )
-    reader, printer, _ = _drive([
-        "tighten the intro cut to the first downbeat",
+    reader, printer, out = _drive([
+        "mark clip 1 'hook' at 0.5s",
+        "fade in the first clip 1s",
+        "tighten the intro cut to the first downbeat",  # not parseable offline
         "quit",
     ])
     await run_repl(session=session, input_reader=reader, printer=printer)
@@ -111,7 +117,12 @@ async def test_repl_interprets_instruction(tmp_run: tuple[RunStore, EventLog, pa
     # - recorded a Director verdict for the instruction.
     # - modified the timeline state of the backend.
     state = backend.get_timeline_state()
-    assert state.tracks[0].items[0].markers  # default offline interpret adds a marker
+    item = state.tracks[0].items[0]
+    assert [m.label for m in item.markers] == ["hook"]
+    assert item.fade_in_seconds == 1.0
+    # The instruction it could not parse is reported, not silently "applied".
+    joined = "\n".join(out)
+    assert "could not interpret offline" in joined
     events = log.read_all(run_id=session.run_id)
     kinds = [e.kind for e in events]
     from director.schemas import EventKind

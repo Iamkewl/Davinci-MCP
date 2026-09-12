@@ -39,10 +39,11 @@ def orchestrator_setup(
 
 async def test_auto_builds_nonempty_timeline_without_errors(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     orch, _store, _log, backend = orchestrator_setup
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4", "/clips/b.mp4"],
+        clip_paths=clips[:2],
         music_path=None,
         user_prompt="tight reel",
     )
@@ -56,10 +57,11 @@ async def test_auto_builds_nonempty_timeline_without_errors(
 
 async def test_symbolic_fade_binding_resolves(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     orch, _store, _log, backend = orchestrator_setup
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="faded reel",
     )
@@ -73,6 +75,7 @@ async def test_symbolic_fade_binding_resolves(
 async def test_all_ops_failing_marks_run_failed(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
     monkeypatch: pytest.MonkeyPatch,
+    clips: list[str],
 ) -> None:
     """If every executed op errored, status must be FAILED even though the plan
     itself got APPROVED.
@@ -122,7 +125,7 @@ async def test_all_ops_failing_marks_run_failed(
 
     monkeypatch.setattr(orch._planner, "run", _always_failing_plan)
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="nothing",
     )

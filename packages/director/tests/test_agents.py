@@ -8,6 +8,7 @@ from director.agents import (
     Planner,
     PlannerRequest,
 )
+from director.agents.director import PlanContext
 from director.ingestion.audio_analyzer import first_n_beats_close_to_times
 from director.schemas import (
     DirectorVerdict,
@@ -64,7 +65,7 @@ async def test_director_offline_returns_verdict() -> None:
     out: DirectorOutcome = await director.run(
         plan=plan,
         user_prompt="x",
-        beat_count=4,
+        context=PlanContext(beat_times=[0.0, 1.0, 2.0, 3.0]),
     )
     assert out.evaluation.verdict in (
         DirectorVerdict.APPROVED,

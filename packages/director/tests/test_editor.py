@@ -124,7 +124,8 @@ async def test_missing_media_surfaces_real_backend_error(
     _seed_project(backend)
     _file_a, _file_b = _make_media_files(tmp_path)
 
-    ghost = PerClipMap(clip_id="clip_ghost01", source_path="/nowhere/ghost.mp4")
+    # The clip exists on disk, but the op references an id nothing maps to.
+    ghost = PerClipMap(clip_id="clip_ghost01", source_path=str(_file_a))
     plan = Plan(
         plan_id="plan_missing",
         target_project="auto-reel",
@@ -157,8 +158,8 @@ async def test_missing_media_surfaces_real_backend_error(
         assert "clip_never_seen" in record.error, record.error
     for message in result.errors:
         assert "frozen" not in message.lower()
-    assert any(c.path == "/nowhere/ghost.mp4" for c in backend.list_media_pool().clips), (
-        "the unknown source path should have been handed to the importer"
+    assert any(c.path == str(_file_a) for c in backend.list_media_pool().clips), (
+        "the clip's real source should still have been imported"
     )
 
 
@@ -275,3 +276,40 @@ async def test_symbol_auto_injected_when_planner_omits_it(
     assert items[0].fade_in_seconds > 0 and items[0].fade_out_seconds > 0
     # The internal binding marker must never leak onto the wire payload.
     assert "__symbolic_id__" not in result.tool_calls[0].arguments
+
+
+async def test_missing_source_file_aborts_before_touching_the_timeline(
+    tmp_run: tuple[RunStore, EventLog, pathlib.Path],
+) -> None:
+    """A source that does not exist is a setup error, not a half-built timeline."""
+    store, log, _tmp = tmp_run
+    backend = FakeResolveBackend(allow_destructive=True)
+    client = StubResolveClient(backend)
+    _seed_project(backend)
+    missing = PerClipMap(clip_id="clip_missing", source_path="/nowhere/ghost.mp4")
+    plan = Plan(
+        plan_id="plan_no_file",
+        target_project="auto-reel",
+        target_timeline="Timeline 1",
+        ops=[
+            PlanOp(
+                id="op_append",
+                kind=PlanOpKind.APPEND_CLIP,
+                args={
+                    "media_clip_id": "clip_missing",
+                    "timeline_track_index": 1,
+                    "start_seconds": 0.0,
+                    "duration_seconds": 1.0,
+                },
+                rationale="source file is absent",
+            )
+        ],
+        summary="missing file",
+    )
+    editor = _make_editor(store, log, client)
+
+    result = await editor.run(run_id="run_missing_file", plan=plan, iteration=1, per_clip=[missing])
+
+    assert result.errors, "an unimportable source must surface as an error"
+    assert result.tool_calls == [], "nothing should have been dispatched"
+    assert not any(tr.items for tr in backend.get_timeline_state().tracks)

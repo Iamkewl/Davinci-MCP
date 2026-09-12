@@ -84,6 +84,28 @@ def _single_op_plan() -> Plan:
     )
 
 
+def _valid_plan_for(clip_path: str) -> Plan:
+    """A plan with no structural problems: real source, sane track, tiled shots."""
+    return _plan_with_ops(
+        [
+            PlanOp(
+                id=f"op_ok_{index}",
+                kind=PlanOpKind.APPEND_CLIP,
+                args={
+                    "media_clip_id": clip_path,
+                    "timeline_track_index": 1,
+                    "start_seconds": float(index) * 2.0,
+                    "duration_seconds": 2.0,
+                    "__symbolic_id__": f"<item:{index}>",
+                },
+                rationale="valid shot",
+            )
+            for index in range(4)
+        ],
+        summary="Four tiled shots from a real source.",
+    )
+
+
 def _approved_shaped_plan() -> Plan:
     """Four ops → narrative 1.0, beat_sync 0.5, all axes above the floors, so
     the offline director scores APPROVED. The ops themselves are sabotaged to
@@ -128,10 +150,11 @@ def _patch_planner(orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, plan: Pl
 
 async def test_auto_run_produces_plan_and_state(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     orch, store, log, _backend = orchestrator_setup
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4", "/clips/b.mp4"],
+        clip_paths=clips[:2],
         music_path=None,
         user_prompt="tight 4-second reel",
     )
@@ -153,12 +176,13 @@ async def test_auto_run_produces_plan_and_state(
 
 async def test_approved_plan_executes_exactly_once(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     """The offline 2-clip plan scores APPROVED (all axes >= floors), so the
     Editor must run exactly once and hand back an EditResult."""
     orch, _store, log, _backend = orchestrator_setup
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4", "/clips/b.mp4"],
+        clip_paths=clips[:2],
         music_path=None,
         user_prompt="tight 4-second reel",
     )
@@ -175,10 +199,11 @@ async def test_approved_plan_executes_exactly_once(
 
 async def test_editor_applies_plan_with_state_observed(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     orch, _store, _log, backend = orchestrator_setup
     await orch.run_auto(
-        clip_paths=["/clips/a.mp4", "/clips/b.mp4"],
+        clip_paths=clips[:2],
         music_path=None,
         user_prompt="make a tiny reel",
     )
@@ -189,10 +214,11 @@ async def test_editor_applies_plan_with_state_observed(
 
 async def test_event_log_records_checkpoint_and_verdict(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
+    clips: list[str],
 ) -> None:
     orch, _store, log, _backend = orchestrator_setup
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="solo clip",
     )
@@ -212,55 +238,62 @@ async def test_pipeline_records_failure_when_input_invalid(
         music_path=None,
         user_prompt="empty",
     )
-    # Empty input → empty plan → narrative 0 warns forever; warned plans never
-    # execute, so budget exhaustion lands on completed_with_warnings.
-    assert result.status is RunStatus.COMPLETED_WITH_WARNINGS
-    assert result.edit_result is None
+    # No clips means no plan and therefore no timeline. A run that built nothing
+    # reports failed; calling it "completed" would be a lie.
+    assert result.status is RunStatus.FAILED
     fetched = store.get_run(result.run_id)
     assert fetched is not None
-    assert fetched.status is RunStatus.COMPLETED_WITH_WARNINGS
+    assert fetched.status is RunStatus.FAILED
 
 
-async def test_warnings_verdict_never_executes(
+async def test_warned_plan_is_attempted_but_status_stays_honest(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
     monkeypatch: pytest.MonkeyPatch,
+    clips: list[str],
 ) -> None:
-    """ACCEPTED_WITH_WARNINGS runs must iterate WITHOUT executing: no editor
-    call, no tool-call records, and the budget exhausts into a warnings exit."""
+    """ACCEPTED_WITH_WARNINGS means "acceptable", so the plan is built once the
+    planner stops changing it — but the status still reports what landed. This
+    plan references a clip that does not exist, so nothing lands and the run is
+    failed rather than a cheerful "completed_with_warnings"."""
     orch, store, _log, _backend = orchestrator_setup
     _patch_planner(orch, monkeypatch, _single_op_plan())
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="nothing usable",
     )
     assert result.verdict is not None
     assert result.verdict.verdict == DirectorVerdict.ACCEPTED_WITH_WARNINGS
-    assert result.status is RunStatus.COMPLETED_WITH_WARNINGS
-    assert result.edit_result is None, "a warned plan was executed"
-    assert result.iterations == 5, "warnings should consume the whole budget"
-    assert store.list_tool_calls(result.run_id) == []
+    # The plan is attempted, but its clip does not exist, so nothing lands.
+    assert result.edit_result is not None, "a warned plan should still be attempted"
+    assert result.edit_result.applied_count == 0
+    assert result.status is RunStatus.FAILED
+    # Re-planning stops as soon as the planner repeats itself instead of burning
+    # the whole budget on an identical plan.
+    assert result.iterations == 2, "an unchanged plan should end the loop"
     fetched = store.get_run(result.run_id)
     assert fetched is not None
-    assert fetched.status is RunStatus.COMPLETED_WITH_WARNINGS
+    assert fetched.status is RunStatus.FAILED
 
 
 async def test_approved_all_ops_fail_maps_failed(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
     monkeypatch: pytest.MonkeyPatch,
+    clips: list[str],
 ) -> None:
     """APPROVED + every executed op erroring must end FAILED, not approved."""
     orch, store, _log, _backend = orchestrator_setup
     _patch_planner(orch, monkeypatch, _approved_shaped_plan())
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="nothing",
     )
     assert result.edit_result is not None, "approved plan was never executed"
     assert result.edit_result.errors, f"expected every op to fail; got {result.edit_result.errors}"
     assert result.status is RunStatus.FAILED
-    assert result.iterations == 1, "approved plan must execute once, not per iteration"
+    executed = store.list_tool_calls(result.run_id)
+    assert len(executed) == 4, "the plan must be executed exactly once"
     fetched = store.get_run(result.run_id)
     assert fetched is not None
     assert fetched.status is RunStatus.FAILED
@@ -269,6 +302,7 @@ async def test_approved_all_ops_fail_maps_failed(
 async def test_approved_partial_success_maps_completed_with_warnings(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
     monkeypatch: pytest.MonkeyPatch,
+    clips: list[str],
 ) -> None:
     """APPROVED + some ops errored but at least one tool call ok → warnings."""
     orch, _store, _log, _backend = orchestrator_setup
@@ -281,6 +315,7 @@ async def test_approved_partial_success_maps_completed_with_warnings(
         plan: Plan,
         iteration: int,
         per_clip: list[PerClipMap],
+        **_: object,
     ) -> EditResult:
         executions.append(iteration)
         return EditResult(
@@ -299,11 +334,11 @@ async def test_approved_partial_success_maps_completed_with_warnings(
 
     monkeypatch.setattr(orch._editor, "run", _partial_editor_run)
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="nothing",
     )
-    assert executions == [1]
+    assert len(executions) == 1, 'the plan must be executed exactly once'
     assert result.edit_result is not None
     assert result.edit_result.errors == ["synthetic partial failure"]
     assert result.status is RunStatus.COMPLETED_WITH_WARNINGS
@@ -312,10 +347,11 @@ async def test_approved_partial_success_maps_completed_with_warnings(
 async def test_approved_clean_execution_maps_completed_approved(
     orchestrator_setup: tuple[Orchestrator, RunStore, EventLog, FakeResolveBackend],
     monkeypatch: pytest.MonkeyPatch,
+    clips: list[str],
 ) -> None:
     """APPROVED + clean execution (no errors) → completed_approved."""
     orch, _store, _log, _backend = orchestrator_setup
-    _patch_planner(orch, monkeypatch, _approved_shaped_plan())
+    _patch_planner(orch, monkeypatch, _valid_plan_for(clips[0]))
 
     async def _clean_editor_run(
         *,
@@ -323,6 +359,7 @@ async def test_approved_clean_execution_maps_completed_approved(
         plan: Plan,
         iteration: int,
         per_clip: list[PerClipMap],
+        **_: object,
     ) -> EditResult:
         return EditResult(
             iteration=iteration,
@@ -340,7 +377,7 @@ async def test_approved_clean_execution_maps_completed_approved(
 
     monkeypatch.setattr(orch._editor, "run", _clean_editor_run)
     result = await orch.run_auto(
-        clip_paths=["/clips/a.mp4"],
+        clip_paths=clips[:1],
         music_path=None,
         user_prompt="nothing",
     )
@@ -367,8 +404,10 @@ def test_terminal_status_honest_mapping() -> None:
     map_status = Orchestrator._terminal_status
     assert map_status(None, None) is RunStatus.FAILED
     assert map_status(failed, None) is RunStatus.FAILED
-    assert map_status(warnings, None) is RunStatus.COMPLETED_WITH_WARNINGS
-    assert map_status(approved, None) is RunStatus.COMPLETED_APPROVED
+    # Nothing executed is a failure, whatever the verdict said.
+    assert map_status(warnings, None) is RunStatus.FAILED
+    # An approved plan that was never executed still produced no timeline.
+    assert map_status(approved, None) is RunStatus.FAILED
     assert map_status(approved, _edit_result(errors=[], ok_calls=2)) is RunStatus.COMPLETED_APPROVED
     assert map_status(approved, _edit_result(errors=["x"], ok_calls=0)) is RunStatus.FAILED
     assert map_status(approved, _edit_result(errors=["x"], ok_calls=1)) is RunStatus.COMPLETED_WITH_WARNINGS

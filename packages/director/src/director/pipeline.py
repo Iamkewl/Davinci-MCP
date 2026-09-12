@@ -1,26 +1,31 @@
 """Top-level pipeline: glues Contextualizer → Planner ↔ Director → Editor.
 
 The pipeline is the only thing the CLI talks to. Resumability: a run is
-identified by ``run_id``; the store holds the iteration counter so a fresh run
-starts at iteration 0 and a resumed run picks up at the next iteration.
+identified by ``run_id``; the store holds the iteration counter and the context
+snapshot so a run can be re-executed later.
+
+The plan/review loop is a real loop: the reviewer's issues and suggestions (plus
+any structural problems found by :func:`director.plan_validation.validate_plan`)
+are fed back into the next planner iteration, so "keep iterating so the planner
+can act on the warnings" is something the code actually does.
 
 Termination is honest:
 
-* APPROVED → the plan executes exactly once via the Editor:
-    - no op errors → status = completed_approved
-    - errors present but at least one tool call succeeded →
-      status = completed_with_warnings (errors surface via ``AutoResult``)
-    - every executed tool call failed → status = failed
-* ACCEPTED_WITH_WARNINGS → the plan is never executed; we keep iterating so
-  the planner can act on the warnings. If the budget runs out on warnings,
-  status = completed_with_warnings.
-* Director FAILED / invalid planner output / budget exhausted without any
-  verdict → status = failed and we surface the latest verdict.
+* APPROVED → the plan executes once via the Editor.
+* ACCEPTED_WITH_WARNINGS → keep iterating for a better plan; if the budget runs
+  out, the best warned plan is executed (that verdict means "acceptable", and a
+  run that reports ``completed_with_warnings`` while building nothing would be a
+  lie). FAILED is never executed.
+* Status reflects what actually landed: no ops applied → ``failed``; some ops
+  applied with errors/warnings → ``completed_with_warnings``; everything applied
+  cleanly on an APPROVED plan → ``completed_approved``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .agents import (
@@ -32,13 +37,17 @@ from .agents import (
     Planner,
     PlannerRequest,
 )
+from .agents.director import PlanContext
+from .agents.planner import parse_target_duration
 from .ingestion.gemini_client import GeminiClient
 from .mcp_client import ResolveClient
+from .plan_validation import validate_plan
 from .schemas import (
     DirectorEvaluation,
     DirectorVerdict,
     EventKind,
     OrchestratorEvent,
+    PerClipMap,
     Plan,
     RunMode,
     RunStatus,
@@ -49,6 +58,8 @@ from .store import EventLog, RunStore
 if TYPE_CHECKING:
     from .llm.base import LLMClient
 
+DEFAULT_PROJECT = "auto-reel"
+
 
 @dataclass
 class AutoResult:
@@ -58,6 +69,24 @@ class AutoResult:
     iterations: int
     edit_result: EditResult | None
     plan: Plan | None
+    target_timeline: str | None = None
+    issues: list[str] = field(default_factory=list)
+
+    @property
+    def timeline_summary(self) -> dict[str, float | int]:
+        """Item count and duration of the timeline this run produced."""
+        state = self.edit_result.final_state if self.edit_result else None
+        if not isinstance(state, dict):
+            return {"items": 0, "duration_seconds": 0.0}
+        items = 0
+        for track in state.get("tracks") or []:
+            if isinstance(track, dict) and isinstance(track.get("items"), list):
+                items += len(track["items"])
+        duration = state.get("duration_seconds")
+        return {
+            "items": items,
+            "duration_seconds": float(duration) if isinstance(duration, int | float) else 0.0,
+        }
 
 
 class Orchestrator:
@@ -82,12 +111,12 @@ class Orchestrator:
         self._planner = Planner(llm=self._llm, settings=settings)
         self._director = Director(llm=self._llm, settings=settings)
         self._editor = Editor(
-            gemini=None,  # editor doesn't call Gemini
+            gemini=None,  # the editor never calls a model
             settings=settings,
             client=client,
             run_store=run_store,
             event_log=event_log,
-            allow_destructive=True,  # auto mode does not use destructive ops anyway
+            allow_destructive=False,  # auto mode never plans destructive ops
         )
 
     # ---- public API --------------------------------------------------------
@@ -98,21 +127,19 @@ class Orchestrator:
         clip_paths: list[str],
         music_path: str | None,
         user_prompt: str,
-        target_project: str = "auto-reel",
-        target_timeline: str = "Timeline 1",
-        target_fps: float = 24.0,
+        target_project: str = DEFAULT_PROJECT,
+        target_timeline: str | None = None,
+        target_fps: float | None = None,
     ) -> AutoResult:
-        """Run Contextualizer → (Planner ↔ Director)*N → Editor.
-
-        Returns a summary record. Run state is persisted in ``run_store``
-        regardless of verdict.
-        """
+        """Run Contextualizer → (Planner ↔ Director)*N → Editor."""
         record = self._run_store.create_run(
             mode=RunMode.AUTO,
             user_prompt=user_prompt,
             input_clips=clip_paths,
             input_music=music_path,
         )
+        # A fresh timeline per run: re-running must not append into an existing cut.
+        timeline_name = target_timeline or f"Reel {record.run_id[:8]}"
         record_dict = record.model_copy(update={"status": RunStatus.RUNNING})
         self._run_store.update_run(record_dict)
         self._event_log.append(
@@ -120,7 +147,7 @@ class Orchestrator:
                 run_id=record.run_id,
                 iteration=0,
                 kind=EventKind.CHECKPOINT,
-                payload={"stage": "started"},
+                payload={"stage": "started", "timeline": timeline_name},
             )
         )
 
@@ -128,45 +155,73 @@ class Orchestrator:
         ctx = await self._contextualizer.run(clip_paths, music_path)
         self._run_store.save_context(record.run_id, ctx.per_clip)
         music_bpm = ctx.music_analysis.bpm if ctx.music_analysis else None
-        beats = (
-            ctx.music_analysis.beat_times.tolist() if ctx.music_analysis else []
-        )
+        beats = ctx.music_analysis.beat_times.tolist() if ctx.music_analysis else []
+        music_duration = ctx.music_analysis.duration_seconds if ctx.music_analysis else None
+        fps = target_fps if target_fps is not None else _infer_fps(ctx.per_clip)
+        tools = await self._editor.available_tools()
+        target_duration = parse_target_duration(user_prompt) or music_duration
 
         verdict: DirectorEvaluation | None = None
         last_plan: Plan | None = None
+        warned_plan: Plan | None = None
         edit_result: EditResult | None = None
-        for iteration in range(1, self._settings.max_planner_iterations + 1):
+        feedback: list[str] = []
+        issues: list[str] = []
+        previous_signature: str | None = None
+        max_iterations = max(1, self._settings.max_planner_iterations)
+
+        for iteration in range(1, max_iterations + 1):
             request = PlannerRequest(
                 user_prompt=user_prompt,
                 per_clip=ctx.per_clip,
                 target_project=target_project,
-                target_timeline=target_timeline,
-                target_fps=target_fps,
+                target_timeline=timeline_name,
+                target_fps=fps,
                 music_bpm=music_bpm,
                 beat_times=beats,
-                music_duration_seconds=(
-                    ctx.music_analysis.duration_seconds if ctx.music_analysis else None
-                ),
+                music_duration_seconds=music_duration,
+                music_path=music_path,
+                available_tools=tools,
+                feedback=feedback,
+                previous_plan=last_plan,
             )
             try:
                 plan = await self._planner.run(request)
             except InvalidModelOutput as err:
                 await self._record_error(record.run_id, iteration, str(err))
+                issues = [str(err)]
                 break
             self._run_store.save_plan(record.run_id, iteration, plan)
+            validation_issues = validate_plan(
+                plan,
+                per_clip=ctx.per_clip,
+                available_tools=tools,
+                music_path=music_path,
+            )
             self._event_log.append(
                 OrchestratorEvent(
                     run_id=record.run_id,
                     iteration=iteration,
                     kind=EventKind.PLAN_COMPILED,
-                    payload={"plan_id": plan.plan_id, "ops": len(plan.ops)},
+                    payload={
+                        "plan_id": plan.plan_id,
+                        "ops": len(plan.ops),
+                        "validation_issues": validation_issues,
+                    },
                 )
             )
 
+            context = PlanContext(
+                beat_times=beats,
+                per_clip=ctx.per_clip,
+                target_duration_seconds=target_duration,
+                music_duration_seconds=music_duration,
+                music_path=music_path,
+                available_tools=tools,
+                validation_issues=validation_issues,
+            )
             director_outcome = await self._director.run(
-                plan=plan,
-                user_prompt=user_prompt,
-                beat_count=len(beats),
+                plan=plan, user_prompt=user_prompt, context=context
             )
             verdict = director_outcome.evaluation
             self._run_store.record_verdict(record.run_id, iteration, verdict)
@@ -182,30 +237,36 @@ class Orchestrator:
                 update={"iterations": iteration, "last_verdict": verdict.verdict}
             )
             self._run_store.update_run(record_dict)
-            if verdict.verdict == DirectorVerdict.APPROVED:
-                last_plan = plan
-                # Execute exactly once, and only on APPROVED.
-                edit_result = await self._editor.run(
-                    run_id=record.run_id,
-                    plan=plan,
-                    iteration=iteration,
-                    per_clip=ctx.per_clip,
+            last_plan = plan
+            issues = [*validation_issues, *verdict.issues]
+
+            if verdict.verdict == DirectorVerdict.APPROVED and not validation_issues:
+                edit_result = await self._execute(record.run_id, plan, iteration, ctx.per_clip,
+                                                  music_path, fps)
+                break
+            if verdict.verdict == DirectorVerdict.FAILED:
+                break  # a failed verdict is a hard stop; never execute it
+            # ACCEPTED_WITH_WARNINGS (or APPROVED with structural problems): iterate
+            # with concrete feedback, and remember the plan in case we run out of budget.
+            repeated = previous_signature is not None and previous_signature == _signature(plan)
+            previous_signature = _signature(plan)
+            warned_plan = plan
+            feedback = _merge_feedback(validation_issues, verdict)
+            if (iteration == max_iterations or repeated) and warned_plan is not None:
+                # Either the budget is gone or the planner has stopped changing its
+                # answer; iterating again would just burn time. The verdict says the
+                # plan is acceptable-with-warnings, so build it and report them.
+                edit_result = await self._execute(
+                    record.run_id, warned_plan, iteration, ctx.per_clip, music_path, fps
                 )
                 break
-            elif verdict.verdict == DirectorVerdict.FAILED:
-                # Stop iterating; surface the verdict.
-                break
-            else:
-                # ACCEPTED_WITH_WARNINGS: never execute a warned plan — keep
-                # iterating so the planner can act on the verifier feedback.
-                last_plan = plan
 
-        # Final status mapping
         status = self._terminal_status(verdict, edit_result)
+        executed_plan = last_plan if edit_result is not None else None
         record_final = record_dict.model_copy(
             update={
                 "status": status,
-                "final_plan_id": last_plan.plan_id if last_plan else None,
+                "final_plan_id": executed_plan.plan_id if executed_plan else None,
             }
         )
         self._run_store.update_run(record_final)
@@ -216,14 +277,15 @@ class Orchestrator:
             iterations=record_final.iterations,
             edit_result=edit_result,
             plan=last_plan,
+            target_timeline=timeline_name,
+            issues=issues,
         )
 
     async def resume_run(self, *, run_id: str) -> AutoResult:
         """Resume a stored run at its last agreed state.
 
-        * If the run has an executed plan, that plan is re-executed against the
-          current backend state (existing items are NOT deduplicated — resume
-          rebuilds the agreed cut).
+        * If the run has an executed plan, that plan is rebuilt on a fresh
+          timeline named "<original> (resume N)", leaving the original cut alone.
         * If no plan was ever executed, the auto loop restarts from the run's
           original inputs.
 
@@ -249,15 +311,16 @@ class Orchestrator:
         running = record.model_copy(update={"status": RunStatus.RUNNING})
         self._run_store.update_run(running)
         per_clip = self._run_store.load_context(run_id)
-        edit_result = await self._editor.run(
-            run_id=run_id,
-            plan=plan,
-            iteration=iteration,
-            per_clip=per_clip,
+        # Rebuild onto a fresh timeline rather than replaying into the existing one:
+        # appending the same cut twice would collide with what is already there, and
+        # silently stacking duplicates on top of the user's edit is worse than a copy.
+        resumed_timeline = f"{plan.target_timeline} (resume {iteration})"
+        plan = plan.model_copy(update={"target_timeline": resumed_timeline})
+        edit_result = await self._execute(
+            run_id, plan, iteration, per_clip, record.input_music, _infer_fps(per_clip)
         )
         status = self._terminal_status(
-            DirectorEvaluation(verdict=DirectorVerdict.APPROVED, overall=1.0),
-            edit_result,
+            DirectorEvaluation(verdict=DirectorVerdict.APPROVED, overall=1.0), edit_result
         )
         final = running.model_copy(
             update={
@@ -274,9 +337,29 @@ class Orchestrator:
             iterations=iteration,
             edit_result=edit_result,
             plan=plan,
+            target_timeline=resumed_timeline,
+            issues=list(edit_result.errors),
         )
 
     # ---- helpers -----------------------------------------------------------
+
+    async def _execute(
+        self,
+        run_id: str,
+        plan: Plan,
+        iteration: int,
+        per_clip: list[PerClipMap],
+        music_path: str | None,
+        fps: float,
+    ) -> EditResult:
+        return await self._editor.run(
+            run_id=run_id,
+            plan=plan,
+            iteration=iteration,
+            per_clip=per_clip,
+            extra_media=[music_path] if music_path else None,
+            target_fps=fps,
+        )
 
     async def _record_error(self, run_id: str, iteration: int, message: str) -> None:
         self._event_log.append(
@@ -295,18 +378,47 @@ class Orchestrator:
     ) -> RunStatus:
         if verdict is None or verdict.verdict == DirectorVerdict.FAILED:
             return RunStatus.FAILED
-        if verdict.verdict == DirectorVerdict.ACCEPTED_WITH_WARNINGS:
-            # Warned plans are never executed, so execution results cannot exist.
+        if edit_result is None:
+            # Nothing was executed: never call that "completed".
+            return RunStatus.FAILED
+        if edit_result.applied_count == 0:
+            return RunStatus.FAILED
+        if edit_result.errors or edit_result.warnings:
             return RunStatus.COMPLETED_WITH_WARNINGS
-        # APPROVED: honest accounting of what actually landed.
-        if edit_result is None or not edit_result.errors:
-            return RunStatus.COMPLETED_APPROVED
-        any_ok = any(call.ok for call in edit_result.tool_calls)
-        return RunStatus.COMPLETED_WITH_WARNINGS if any_ok else RunStatus.FAILED
+        if verdict.verdict == DirectorVerdict.ACCEPTED_WITH_WARNINGS:
+            return RunStatus.COMPLETED_WITH_WARNINGS
+        return RunStatus.COMPLETED_APPROVED
+
+
+def _signature(plan: Plan) -> str:
+    """Identity of a plan's *content*, so a repeated answer can be spotted."""
+    return json.dumps(
+        [[op.kind.value, sorted(op.args.items(), key=str)] for op in plan.ops],
+        default=str,
+        sort_keys=True,
+    )
+
+
+def _merge_feedback(validation_issues: list[str], verdict: DirectorEvaluation) -> list[str]:
+    """What the next planner iteration is told to fix."""
+    merged: list[str] = []
+    for source in (validation_issues, verdict.issues, verdict.suggestions):
+        for entry in source:
+            if entry and entry not in merged:
+                merged.append(entry)
+    return merged
+
+
+def _infer_fps(per_clip: list[PerClipMap]) -> float:
+    """Timeline fps = the most common source fps, falling back to 24."""
+    rates = Counter(round(c.fps, 3) for c in per_clip if c.fps and c.fps > 0)
+    if not rates:
+        return 24.0
+    return float(rates.most_common(1)[0][0])
 
 
 class ResumeError(RuntimeError):
     """Raised when a run cannot be resumed."""
 
 
-__all__ = ["AutoResult", "Orchestrator", "ResumeError"]
+__all__ = ["DEFAULT_PROJECT", "AutoResult", "Orchestrator", "ResumeError"]
