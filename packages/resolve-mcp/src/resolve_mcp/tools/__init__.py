@@ -56,6 +56,11 @@ def create_project(
     return cast("dict[str, Any]", info.model_dump(mode="json"))
 
 
+def list_projects(backend: ResolveBackend) -> dict[str, Any]:
+    """List the projects in the current project-manager folder."""
+    return {"projects": list(backend.list_projects())}
+
+
 def save_project(backend: ResolveBackend) -> dict[str, Any]:
     """Persist the current project."""
     return cast("dict[str, Any]", backend.save_project().model_dump(mode="json"))
@@ -120,6 +125,21 @@ def create_timeline(
     return cast("dict[str, Any]", tl.model_dump(mode="json"))
 
 
+def list_timelines(backend: ResolveBackend) -> dict[str, Any]:
+    """List the timelines in the current project and which one is current."""
+    return {"timelines": [t.model_dump(mode="json") for t in backend.list_timelines()]}
+
+
+def set_current_timeline(backend: ResolveBackend, name: str) -> dict[str, Any]:
+    """Make an existing timeline current; later edits apply to it.
+
+    Args:
+        name: Timeline name as reported by list_timelines.
+    """
+    state = backend.set_current_timeline(name)
+    return cast("dict[str, Any]", state.model_dump(mode="json"))
+
+
 def get_timeline_state(backend: ResolveBackend) -> dict[str, Any]:
     """Return the full state of the current timeline."""
     return cast("dict[str, Any]", backend.get_timeline_state().model_dump(mode="json"))
@@ -160,14 +180,17 @@ def insert_clip(
     duration_seconds: float,
     source_in_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Insert a clip at a specific position; later clips shift right.
+    """Ripple-insert a clip: items at/after the position on that track shift right.
+
+    The position must fall on a clip boundary or empty space; inserting into the
+    middle of an existing clip is rejected rather than silently overlapping.
 
     Args:
         media_clip_id: Media-clip id from the media pool.
-        timeline_track_index: Index of the target track.
-        timeline_position_seconds: Where to insert (seconds).
+        timeline_track_index: 1-based track index (see get_timeline_state.tracks).
+        timeline_position_seconds: Where to insert (seconds from timeline start).
         duration_seconds: Length of the new clip (seconds).
-        source_in_seconds: In-point of source clip.
+        source_in_seconds: In-point inside the source clip (seconds).
     """
     delta = backend.insert_clip(
         media_clip_id=media_clip_id,
@@ -180,10 +203,10 @@ def insert_clip(
 
 
 def delete_clip(backend: ResolveBackend, timeline_item_id: str) -> dict[str, Any]:
-    """Remove a timeline item. Returns the state delta.
+    """Remove one item from the timeline (the media stays in the pool).
 
     Args:
-        timeline_item_id: Item id to delete.
+        timeline_item_id: Item id to delete, from get_timeline_state.
     """
     delta = backend.delete_clip(timeline_item_id)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
@@ -196,9 +219,14 @@ def move_clip(
 ) -> dict[str, Any]:
     """Reposition a timeline item; returns the state delta.
 
+    Resolve has no reposition API, so the live DaVinci backend recreates the
+    item at the new position: its id changes and the delta's ``id_remap`` maps
+    the old id to the new one. Colour grades and Fusion comps do not survive
+    that round-trip.
+
     Args:
         timeline_item_id: Item id to move.
-        new_position_seconds: New position in seconds.
+        new_position_seconds: New start position (seconds from timeline start).
     """
     delta = backend.move_clip(timeline_item_id, new_position_seconds)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
@@ -218,7 +246,18 @@ def set_transform(
     anchor_x: float = 0.5,
     anchor_y: float = 0.5,
 ) -> dict[str, Any]:
-    """Set the transform on a timeline item. Returns the state delta."""
+    """Set the transform on a timeline item, in Resolve Inspector units.
+
+    Args:
+        timeline_item_id: Item to transform.
+        pan_x: Horizontal offset in pixels from centre (Resolve "Pan").
+        pan_y: Vertical offset in pixels from centre (Resolve "Tilt").
+        zoom_x: Horizontal scale multiplier, 1.0 = 100%.
+        zoom_y: Vertical scale multiplier, 1.0 = 100%.
+        rotation: Rotation in degrees, -360..360.
+        anchor_x: Anchor point offset in pixels from centre.
+        anchor_y: Anchor point offset in pixels from centre.
+    """
     delta = backend.set_transform(
         timeline_item_id=timeline_item_id,
         pan_x=pan_x,
@@ -240,7 +279,15 @@ def set_crop(
     top: float,
     bottom: float,
 ) -> dict[str, Any]:
-    """Set the crop on a timeline item. Returns the state delta."""
+    """Crop a timeline item by pixels removed from each edge.
+
+    Args:
+        timeline_item_id: Item to crop.
+        left: Pixels cropped from the left edge.
+        right: Pixels cropped from the right edge.
+        top: Pixels cropped from the top edge.
+        bottom: Pixels cropped from the bottom edge.
+    """
     delta = backend.set_crop(timeline_item_id, left, right, top, bottom)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -250,7 +297,12 @@ def set_composite_mode(
     timeline_item_id: str,
     mode: str,
 ) -> dict[str, Any]:
-    """Set the composite/blending mode. ``mode`` is a CompositeMode enum value."""
+    """Set the composite (blend) mode of a timeline item.
+
+    Args:
+        timeline_item_id: Item to change.
+        mode: Blend mode, e.g. "normal", "screen", "multiply", "add".
+    """
     delta = backend.set_composite_mode(timeline_item_id, mode)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -260,7 +312,12 @@ def set_opacity(
     timeline_item_id: str,
     opacity: float,
 ) -> dict[str, Any]:
-    """Set the item opacity in [0.0, 1.0]. Returns the state delta."""
+    """Set item opacity.
+
+    Args:
+        timeline_item_id: Item to change.
+        opacity: 0.0 (transparent) .. 1.0 (opaque).
+    """
     delta = backend.set_opacity(timeline_item_id, opacity)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -271,7 +328,16 @@ def add_fade(
     fade_in_seconds: float,
     fade_out_seconds: float,
 ) -> dict[str, Any]:
-    """Set fade-in and fade-out durations on a timeline item."""
+    """Set fade-in/fade-out durations on a timeline item (fake backend only).
+
+    Resolve's scripting API exposes no fade handles, so the live DaVinci backend
+    rejects this call with an "unsupported" error instead of pretending.
+
+    Args:
+        timeline_item_id: Item to fade.
+        fade_in_seconds: Fade-in length in seconds (0 = none).
+        fade_out_seconds: Fade-out length in seconds (0 = none).
+    """
     delta = backend.add_fade(timeline_item_id, fade_in_seconds, fade_out_seconds)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -281,7 +347,15 @@ def set_speed(
     timeline_item_id: str,
     speed: float,
 ) -> dict[str, Any]:
-    """Set the playback speed multiplier on a timeline item (>0)."""
+    """Set the playback speed multiplier of a timeline item (fake backend only).
+
+    Retiming is not in Resolve's documented scripting API, so the live DaVinci
+    backend rejects this call with an "unsupported" error.
+
+    Args:
+        timeline_item_id: Item to retime.
+        speed: Multiplier > 0 (0.5 = half speed, 2.0 = double speed).
+    """
     delta = backend.set_speed(timeline_item_id, speed)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -294,7 +368,15 @@ def add_marker(
     color: str,
     note: str = "",
 ) -> dict[str, Any]:
-    """Add a point marker on a timeline item. Returns the state delta."""
+    """Add a point marker on a timeline item.
+
+    Args:
+        timeline_item_id: Item to mark.
+        position_seconds: Offset from the START OF THE ITEM, not the timeline.
+        label: Short marker name.
+        color: Resolve marker colour, e.g. "blue", "red", "cream".
+        note: Optional longer note.
+    """
     delta = backend.add_marker(timeline_item_id, position_seconds, label, color, note)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -310,7 +392,18 @@ def add_transition(
     duration_seconds: float,
     alignment: str,
 ) -> dict[str, Any]:
-    """Add a transition attached to the given item. Returns the state delta."""
+    """Attach a transition to a timeline item (fake backend only).
+
+    Resolve's documented scripting API cannot create transitions, so the live
+    DaVinci backend rejects this call with an "unsupported" error.
+
+    Args:
+        timeline_item_id: Item the transition attaches to.
+        track_index: 1-based index of the track holding that item.
+        style: e.g. "cross_dissolve", "dip_to_black".
+        duration_seconds: Transition length in seconds.
+        alignment: "start", "end" or "mid" of the item boundary.
+    """
     delta = backend.add_transition(timeline_item_id, track_index, style, duration_seconds, alignment)
     return cast("dict[str, Any]", delta.model_dump(mode="json"))
 
@@ -324,7 +417,13 @@ def add_render_job(
     format: str,
     output_path: str,
 ) -> dict[str, Any]:
-    """Queue a render job. Returns the render-job record."""
+    """Queue a render job for a timeline.
+
+    Args:
+        timeline_name: Timeline to render (see list_timelines).
+        format: Output preset: "mp4", "mov", "prores" or "dnxhr".
+        output_path: Full output file path; its directory is created if needed.
+    """
     job = backend.add_render_job(timeline_name, format, output_path)
     return cast("dict[str, Any]", job.model_dump(mode="json"))
 
@@ -350,7 +449,11 @@ def quit_app(backend: ResolveBackend, confirm: bool) -> dict[str, Any]:
 
 
 def restart_app(backend: ResolveBackend, confirm: bool) -> dict[str, Any]:
-    """Restart DaVinci Resolve. Requires ``confirm=True`` AND --allow-destructive."""
+    """Restart the app — fake backend only.
+
+    Resolve can quit but cannot relaunch itself, so the live DaVinci backend does
+    not expose this tool at all; use quit_app and start Resolve yourself.
+    """
     return cast("dict[str, Any]", backend.restart_app(confirm=confirm))
 
 
@@ -383,6 +486,8 @@ __all__ = [
     "import_media",
     "insert_clip",
     "list_media_pool",
+    "list_projects",
+    "list_timelines",
     "move_clip",
     "open_project",
     "quit_app",
@@ -390,6 +495,7 @@ __all__ = [
     "save_project",
     "set_composite_mode",
     "set_crop",
+    "set_current_timeline",
     "set_opacity",
     "set_speed",
     "set_transform",

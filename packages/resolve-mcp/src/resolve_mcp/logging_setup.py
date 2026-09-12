@@ -14,7 +14,13 @@ import structlog
 
 
 def configure_logging(level: str = "INFO") -> None:
-    """Configure stdlib + structlog to write JSON lines to stderr."""
+    """Configure stdlib + structlog to write JSON lines to stderr.
+
+    stderr is not a preference here: on the stdio transport, stdout carries the
+    JSON-RPC frames, so a single log line printed there corrupts the stream and
+    the client fails to parse the session. structlog's default
+    ``PrintLoggerFactory`` writes to stdout, hence the explicit factory below.
+    """
     logging.basicConfig(
         level=level,
         format="%(message)s",
@@ -32,7 +38,8 @@ def configure_logging(level: str = "INFO") -> None:
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
         ),
-        cache_logger_on_first_use=True,
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        cache_logger_on_first_use=False,
     )
 
 

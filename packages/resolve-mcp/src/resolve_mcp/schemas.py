@@ -97,34 +97,97 @@ class TrackKind(enum.StrEnum):
 
 
 class Transform(StrictModel):
-    """Resolve item transform: pan + zoom. Stored in normalized units where applicable."""
+    """Resolve item transform, in Resolve's own Inspector units.
+
+    ``pan_*`` / ``anchor_*`` are pixel offsets from the frame centre (Resolve
+    ``Pan``/``Tilt``/``AnchorPointX``/``AnchorPointY``), ``zoom_*`` is a scale
+    multiplier where 1.0 = 100% (``ZoomX``/``ZoomY``), ``rotation`` is degrees
+    (``RotationAngle``).
+    """
 
     pan_x: float = 0.0
     pan_y: float = 0.0
-    zoom_x: float = 1.0
-    zoom_y: float = 1.0
-    rotation: float = 0.0
-    anchor_x: float = 0.5
-    anchor_y: float = 0.5
+    zoom_x: Annotated[float, Field(gt=0.0, le=100.0)] = 1.0
+    zoom_y: Annotated[float, Field(gt=0.0, le=100.0)] = 1.0
+    rotation: Annotated[float, Field(ge=-360.0, le=360.0)] = 0.0
+    anchor_x: float = 0.0
+    anchor_y: float = 0.0
 
 
 class Crop(StrictModel):
-    left: float = 0.0
-    right: float = 0.0
-    top: float = 0.0
-    bottom: float = 0.0
+    """Crop in pixels removed from each edge (Resolve ``CropLeft``/``CropRight``/...)."""
+
+    left: NonNegativeFloat = 0.0
+    right: NonNegativeFloat = 0.0
+    top: NonNegativeFloat = 0.0
+    bottom: NonNegativeFloat = 0.0
 
 
 class CompositeMode(enum.StrEnum):
+    """Blend modes; each maps to a documented ``resolve.COMPOSITE_*`` constant."""
+
     NORMAL = "normal"
+    ADD = "add"
+    SUBTRACT = "subtract"
+    DIFFERENCE = "difference"
     MULTIPLY = "multiply"
     SCREEN = "screen"
     OVERLAY = "overlay"
-    SOFT_LIGHT = "soft_light"
     HARD_LIGHT = "hard_light"
+    SOFT_LIGHT = "soft_light"
+    DARKEN = "darken"
+    LIGHTEN = "lighten"
+    COLOR_DODGE = "color_dodge"
+    COLOR_BURN = "color_burn"
+    EXCLUSION = "exclusion"
+    LINEAR_DODGE = "linear_dodge"
+    LINEAR_BURN = "linear_burn"
+    LINEAR_LIGHT = "linear_light"
+    VIVID_LIGHT = "vivid_light"
+    PIN_LIGHT = "pin_light"
+    HARD_MIX = "hard_mix"
+    LIGHTER_COLOR = "lighter_color"
+    DARKER_COLOR = "darker_color"
+    HUE = "hue"
+    SATURATION = "saturation"
+    COLOR = "color"
+    LUMINOSITY = "luminosity"
+
+
+#: CompositeMode -> name of the documented Resolve constant (``getattr(resolve, name)``).
+COMPOSITE_CONSTANT_NAMES: dict[CompositeMode, str] = {
+    CompositeMode.NORMAL: "COMPOSITE_NORMAL",
+    CompositeMode.ADD: "COMPOSITE_ADD",
+    CompositeMode.SUBTRACT: "COMPOSITE_SUBTRACT",
+    CompositeMode.DIFFERENCE: "COMPOSITE_DIFF",
+    CompositeMode.MULTIPLY: "COMPOSITE_MULTIPLY",
+    CompositeMode.SCREEN: "COMPOSITE_SCREEN",
+    CompositeMode.OVERLAY: "COMPOSITE_OVERLAY",
+    CompositeMode.HARD_LIGHT: "COMPOSITE_HARDLIGHT",
+    CompositeMode.SOFT_LIGHT: "COMPOSITE_SOFTLIGHT",
+    CompositeMode.DARKEN: "COMPOSITE_DARKEN",
+    CompositeMode.LIGHTEN: "COMPOSITE_LIGHTEN",
+    CompositeMode.COLOR_DODGE: "COMPOSITE_COLOR_DODGE",
+    CompositeMode.COLOR_BURN: "COMPOSITE_COLOR_BURN",
+    CompositeMode.EXCLUSION: "COMPOSITE_EXCLUSION",
+    CompositeMode.LINEAR_DODGE: "COMPOSITE_LINEAR_DODGE",
+    CompositeMode.LINEAR_BURN: "COMPOSITE_LINEAR_BURN",
+    CompositeMode.LINEAR_LIGHT: "COMPOSITE_LINEAR_LIGHT",
+    CompositeMode.VIVID_LIGHT: "COMPOSITE_VIVID_LIGHT",
+    CompositeMode.PIN_LIGHT: "COMPOSITE_PIN_LIGHT",
+    CompositeMode.HARD_MIX: "COMPOSITE_HARD_MIX",
+    CompositeMode.LIGHTER_COLOR: "COMPOSITE_LIGHTER_COLOR",
+    CompositeMode.DARKER_COLOR: "COMPOSITE_DARKER_COLOR",
+    CompositeMode.HUE: "COMPOSITE_HUE",
+    CompositeMode.SATURATION: "COMPOSITE_SATURATE",
+    CompositeMode.COLOR: "COMPOSITE_COLORIZE",
+    CompositeMode.LUMINOSITY: "COMPOSITE_LUM",
+}
 
 
 class MarkerColor(enum.StrEnum):
+    """Resolve's 16 marker colours (passed to Resolve Capitalized, e.g. ``"Blue"``)."""
+
     BLUE = "blue"
     CYAN = "cyan"
     GREEN = "green"
@@ -139,8 +202,8 @@ class MarkerColor(enum.StrEnum):
     MINT = "mint"
     LEMON = "lemon"
     SAND = "sand"
-    TAWNY = "tawny"
     COCOA = "cocoa"
+    CREAM = "cream"
 
 
 class Marker(StrictModel):
@@ -258,3 +321,16 @@ class StateDelta(StrictModel):
     before: dict[str, Any]
     after: dict[str, Any]
     changed_paths: list[str]
+    #: Old timeline-item id -> new id for items the backend had to recreate
+    #: (the live backend's move/ripple-insert). Empty when ids are stable.
+    id_remap: dict[str, str] = Field(default_factory=dict)
+
+
+# --- Timeline listing -----------------------------------------------------------
+
+
+class TimelineSummary(StrictModel):
+    """One entry of ``list_timelines``."""
+
+    name: str
+    is_current: bool = False

@@ -29,9 +29,6 @@ def timeline_resource(backend: ResolveBackend) -> str:
     return json.dumps(backend.get_timeline_state().model_dump(mode="json"), indent=2)
 
 
-__all__ = ["media_pool_resource", "project_resource", "timeline_resource"]
-
-
 def all_resources(backend: ResolveBackend) -> dict[str, Any]:
     """Return all three resources keyed by URI — useful for tests and a UI dump."""
     return {
@@ -39,3 +36,11 @@ def all_resources(backend: ResolveBackend) -> dict[str, Any]:
         "resolve://media-pool": media_pool_resource(backend),
         "resolve://timeline/current": timeline_resource(backend),
     }
+
+
+__all__ = [
+    "all_resources",
+    "media_pool_resource",
+    "project_resource",
+    "timeline_resource",
+]

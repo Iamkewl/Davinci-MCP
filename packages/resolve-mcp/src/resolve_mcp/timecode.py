@@ -78,6 +78,18 @@ class TimeConverter:
             raise ValueError(msg)
         return math.floor(seconds * self._fps.num / self._fps.den)
 
+    def seconds_to_frames_round(self, seconds: float) -> int:
+        """Nearest-frame conversion for placing edits.
+
+        :meth:`seconds_to_frames` floors, which turns a float like
+        ``5/24*24 == 4.999999...`` into the previous frame. Placement (record
+        frames, source in/out, marker offsets) wants the nearest frame instead.
+        """
+        if seconds < 0:
+            msg = f"seconds must be >= 0, got {seconds}"
+            raise ValueError(msg)
+        return round(seconds * self._fps.num / self._fps.den)
+
     def frames_to_seconds(self, frames: int) -> float:
         if frames < 0:
             msg = f"frames must be >= 0, got {frames}"

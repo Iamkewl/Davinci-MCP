@@ -13,6 +13,8 @@ that mirrors the server flag, so we exercise both behaviours from one suite.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from resolve_mcp.backend import (
     DestructiveDisabledError,
@@ -28,16 +30,16 @@ from resolve_mcp.schemas import (
     TransitionStyle,
 )
 
+MediaFactory = Callable[..., list[str]]
+
 # --- per-item: transforms / crop / composite / opacity / fade / speed / marker
 
 
 @pytest.fixture
-def with_item() -> tuple[FakeResolveBackend, str]:
-    be = FakeResolveBackend()
-    be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/a.mp4"])
-    be.create_timeline("main", 24.0)
-    media = be.list_media_pool().clips[0].id
+def with_item(
+    seeded_timeline: tuple[FakeResolveBackend, str],
+) -> tuple[FakeResolveBackend, str]:
+    be, media = seeded_timeline
     be.append_clip(media, 1, 0.0, 4.0)
     item_id = be.get_timeline_state().tracks[0].items[0].id
     return be, item_id
@@ -56,9 +58,9 @@ def test_set_transform_returns_delta(with_item: tuple[FakeResolveBackend, str]) 
 
 def test_set_crop(with_item: tuple[FakeResolveBackend, str]) -> None:
     be, item_id = with_item
-    be.set_crop(item_id, left=0.1, right=0.2, top=0.05, bottom=0.06)
+    be.set_crop(item_id, left=120.0, right=80.0, top=10.0, bottom=10.0)
     saved = be.get_timeline_state().tracks[0].items[0]
-    assert saved.crop.left == 0.1
+    assert saved.crop.left == 120.0
 
 
 def test_set_composite_mode_str_input(with_item: tuple[FakeResolveBackend, str]) -> None:
@@ -73,7 +75,7 @@ def test_set_opacity_validates_bounds(with_item: tuple[FakeResolveBackend, str])
     be.set_opacity(item_id, 0.4)
     state = be.get_timeline_state()
     assert state.tracks[0].items[0].opacity == 0.4
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidStateError):
         be.set_opacity(item_id, 1.5)
 
 
@@ -87,7 +89,7 @@ def test_add_fade(with_item: tuple[FakeResolveBackend, str]) -> None:
 
 def test_add_fade_validates_total(with_item: tuple[FakeResolveBackend, str]) -> None:
     be, item_id = with_item
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidStateError):
         be.add_fade(item_id, fade_in_seconds=3.0, fade_out_seconds=3.0)  # exceeds item duration
 
 
@@ -96,7 +98,7 @@ def test_set_speed(with_item: tuple[FakeResolveBackend, str]) -> None:
     be.set_speed(item_id, 2.0)
     saved = be.get_timeline_state().tracks[0].items[0]
     assert saved.speed == 2.0
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidStateError):
         be.set_speed(item_id, -1.0)
 
 
@@ -111,7 +113,7 @@ def test_add_marker_appends(with_item: tuple[FakeResolveBackend, str]) -> None:
 
 def test_add_marker_position_bound(with_item: tuple[FakeResolveBackend, str]) -> None:
     be, item_id = with_item
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidStateError):
         be.add_marker(item_id, position_seconds=999.0, label="x", color="red")
 
 
@@ -166,8 +168,10 @@ def test_render_job_lifecycle() -> None:
     assert job.status is RenderJobStatus.QUEUED
     started = be.start_render(job.id)
     assert started.status is RenderJobStatus.RUNNING
+    # A fake render is done by the time it is polled, so clients terminate.
     fetched = be.get_render_status(job.id)
-    assert fetched.status is RenderJobStatus.RUNNING
+    assert fetched.status is RenderJobStatus.COMPLETED
+    assert fetched.progress == 1.0
 
 
 def test_start_render_invalid_state() -> None:
@@ -182,6 +186,7 @@ def test_start_render_invalid_state() -> None:
 
 def test_get_render_status_unknown() -> None:
     be = FakeResolveBackend()
+    be.create_project("reel", 24.0, 1920, 1080)
     with pytest.raises(NotFoundError):
         be.get_render_status("job_nope")
 
@@ -196,10 +201,10 @@ def test_add_render_job_unknown_timeline() -> None:
 # --- destructive gate --------------------------------------------------------
 
 
-def test_destructive_blocked_when_flag_off() -> None:
+def test_destructive_blocked_when_flag_off(make_media: MediaFactory) -> None:
     be = FakeResolveBackend(allow_destructive=False)
     be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/a.mp4"])
+    be.import_media(make_media("a.mp4"))
     be.create_timeline("main", 24.0)
     with pytest.raises(DestructiveDisabledError):
         be.quit_app(confirm=True)
@@ -211,10 +216,10 @@ def test_destructive_blocked_when_flag_off() -> None:
         be.delete_media("x", confirm=True)
 
 
-def test_destructive_blocked_when_flag_on_but_no_confirm() -> None:
+def test_destructive_blocked_when_flag_on_but_no_confirm(make_media: MediaFactory) -> None:
     be = FakeResolveBackend(allow_destructive=True)
     be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/a.mp4"])
+    be.import_media(make_media("a.mp4"))
     be.create_timeline("main", 24.0)
     # confirm=False is still refused even when the flag is on.
     with pytest.raises(DestructiveDisabledError):
@@ -223,10 +228,10 @@ def test_destructive_blocked_when_flag_on_but_no_confirm() -> None:
         be.delete_timeline("main", confirm=False)
 
 
-def test_destructive_allowed_with_flag_and_confirm() -> None:
+def test_destructive_allowed_with_flag_and_confirm(make_media: MediaFactory) -> None:
     be = FakeResolveBackend(allow_destructive=True)
     be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/a.mp4"])
+    be.import_media(make_media("a.mp4"))
     be.create_timeline("main", 24.0)
     res = be.quit_app(confirm=True)
     assert res["quit"] is True
@@ -242,13 +247,13 @@ def test_delete_timeline_with_flag_and_confirm() -> None:
     be.create_timeline("main", 24.0)
     delta = be.delete_timeline("main", confirm=True)
     assert "timelines.main" in delta.changed_paths[0]
-    assert "main" not in be._timelines
+    assert [t.name for t in be.list_timelines()] == []
 
 
-def test_delete_media_with_flag_and_confirm() -> None:
+def test_delete_media_with_flag_and_confirm(make_media: MediaFactory) -> None:
     be = FakeResolveBackend(allow_destructive=True)
     be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/x.mp4"])
+    be.import_media(make_media("x.mp4"))
     media_id = be.list_media_pool().clips[0].id
     res = be.delete_media(media_id, confirm=True)
     assert res["deleted"]["id"] == media_id

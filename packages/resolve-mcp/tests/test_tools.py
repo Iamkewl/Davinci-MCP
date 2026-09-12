@@ -4,6 +4,8 @@ to verify the JSON-shaped output FastMCP will see.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from resolve_mcp.fake_backend import FakeResolveBackend
 from resolve_mcp.tools import (
@@ -17,16 +19,21 @@ from resolve_mcp.tools import (
     import_media,
     insert_clip,
     list_media_pool,
+    list_projects,
+    list_timelines,
     open_project,
     save_project,
+    set_current_timeline,
 )
+
+MediaFactory = Callable[..., list[str]]
 
 
 @pytest.fixture
-def seeded() -> FakeResolveBackend:
+def seeded(make_media: MediaFactory) -> FakeResolveBackend:
     be = FakeResolveBackend()
     be.create_project("reel", 24.0, 1920, 1080)
-    be.import_media(["/tmp/a.mp4", "/tmp/b.mp4"])
+    be.import_media(make_media("a.mp4", "b.mp4"))
     be.create_timeline("main", 24.0)
     return be
 
@@ -48,8 +55,10 @@ def test_save_get_info(seeded: FakeResolveBackend) -> None:
     assert info["is_modified"] is False
 
 
-def test_import_into_default_master_bin(seeded: FakeResolveBackend) -> None:
-    out = import_media(seeded, ["/tmp/c.mp4"])
+def test_import_into_default_master_bin(
+    seeded: FakeResolveBackend, make_media: MediaFactory
+) -> None:
+    out = import_media(seeded, make_media("c.mp4"))
     assert out[0]["bin"] == "Master"
 
 
@@ -103,3 +112,16 @@ def test_full_round_trip(seeded: FakeResolveBackend) -> None:
     final = get_timeline_state(seeded)
     assert final["duration_seconds"] == 3.5
     assert len(final["tracks"][0]["items"]) == 1
+
+
+def test_list_projects_tool(seeded: FakeResolveBackend) -> None:
+    assert list_projects(seeded) == {"projects": ["reel"]}
+
+
+def test_list_and_set_current_timeline_tools(seeded: FakeResolveBackend) -> None:
+    create_timeline(seeded, "second", 24.0)
+    listed = list_timelines(seeded)["timelines"]
+    assert {t["name"]: t["is_current"] for t in listed} == {"main": False, "second": True}
+    switched = set_current_timeline(seeded, "main")
+    assert switched["name"] == "main"
+    assert get_timeline_state(seeded)["name"] == "main"

@@ -50,6 +50,13 @@ class ResolveUnavailableError(ResolveMCPError):
     code = "resolve_unavailable"
 
 
+class UnsupportedOperationError(ResolveMCPError):
+    """The backend cannot perform this operation at all (e.g. Resolve's scripting
+    API has no entry point for it) — distinct from Resolve being unreachable."""
+
+    code = "unsupported"
+
+
 # --- Protocol ------------------------------------------------------------------
 
 
@@ -64,6 +71,12 @@ class ResolveBackend(Protocol):
     evolve impl signatures (and accept ``FrameRate | dict | float``) without breaking
     the protocol check. We validate the *returned* shapes, which are strict.
     """
+
+    # ---- capabilities ----
+
+    def unsupported_tools(self) -> frozenset[str]:
+        """Tool names this backend cannot honor; the server does not register them."""
+        ...
 
     # ---- project ----
 
@@ -82,6 +95,8 @@ class ResolveBackend(Protocol):
     # ---- timeline ----
 
     def create_timeline(self, name: str, frame_rate: Any) -> Any: ...
+    def list_timelines(self) -> Any: ...
+    def set_current_timeline(self, name: str) -> Any: ...
     def get_timeline_state(self) -> Any: ...
     def append_clip(
         self,
