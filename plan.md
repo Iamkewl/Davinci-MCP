@@ -97,7 +97,7 @@ director/llm/
 
 ## Phase 6 — Truthfulness sweep + hygiene
 
-- [ ] **LICENSE:** still unchosen — a licence is the owner's call, so nothing has been committed. README now says so explicitly instead of linking a file that does not exist.
+- [x] **LICENSE:** MIT, chosen by the owner on 2026-09-13. README links the real file.
 - [x] README: fix Quickstart (`uv sync --all-extras --all-packages`), Development section (scoped mypy command), remove/mark unverifiable claims until smoke-tested (live-path feature bullets gated on Phase 3 checklist), document stable-ID limitation + provider selection + honest `insert_clip` semantics.
 - [x] DECISIONS.md: correct the harness-circularity claim (harness models documented API now, still no substitute for the manual smoke checklist), drop-frame round-trip claim becomes true again post-Phase 2, resume claim scrubbed or implemented.
 - [x] Resume: IMPLEMENTED (owner chose build-over-scrub). `Orchestrator.resume_run` re-executes the last agreed plan (context snapshot persisted per-run); `director resume <run_id>` CLI command; refuses in-flight runs; unknown ids fail cleanly.
@@ -198,7 +198,6 @@ Phase 6 lands last so docs describe finished reality.
 
 ## Remaining
 
-1. **LICENSE** — owner's decision (see Phase 6).
-2. **Manual smoke test on real Resolve Studio hardware** — the only way to close the last
+1. **Manual smoke test on real Resolve Studio hardware** — the only way to close the last
    documentation-verified gap. Everything else is green offline, on WSL and on native
    Windows.

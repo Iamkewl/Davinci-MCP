@@ -269,6 +269,7 @@ Davinci-MCP/
 │   └── director/        # Layer 2 — orchestrator (google-genai, openai, librosa, typer, …)
 ├── .env.example
 ├── AGENTS.md            # working notes for AI agents in this repo
+├── LICENSE              # MIT
 ├── DECISIONS.md         # the "why" behind the key design choices
 ├── plan.md              # remediation roadmap and its status
 ├── pyproject.toml       # uv workspace root
@@ -299,4 +300,4 @@ This project was built almost entirely by AI, and it's worth being clear about w
 
 ## License
 
-Not yet chosen — see [plan.md](plan.md). Until a `LICENSE` file lands, all rights are reserved by the author.
+[MIT](LICENSE) © 2026 Suryaansh.
