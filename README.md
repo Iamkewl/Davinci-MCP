@@ -1,5 +1,9 @@
 # DaVinci-MCP
 
+[![ci](https://github.com/Iamkewl/Davinci-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Iamkewl/Davinci-MCP/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+
 **Hand your clips and a music track to an agent, and let it cut the video for you.**
 
 DaVinci-MCP is an open-source system that automates video editing inside [DaVinci Resolve Studio](https://www.blackmagicdesign.com/products/davinciresolve). It analyzes your raw footage, finds the beats in your soundtrack, plans a beat-synced timeline, and builds it for you — driving Resolve through the [Model Context Protocol](https://modelcontextprotocol.io) (MCP).
@@ -256,7 +260,7 @@ Open problems in *this* implementation, as opposed to the platform limits above.
 - **stdio is the only transport.** `RESOLVE_MCP_TRANSPORT` accepts nothing else yet.
 - **Render presets are a fixed set.** `mp4`, `mov`, `prores` and `dnxhr` map to format/codec hints that are matched against what your Resolve build actually offers; anything else needs a new entry in `_RENDER_FORMAT_HINTS`.
 - **`insert_clip` refuses to split a clip.** Inserting in the middle of an existing item is rejected rather than silently overlapping it; cut the item first.
-- **Two `test_media_probe.py` cases need a working ffmpeg and skip without one.** They ask ffmpeg to write a real fixture clip into pytest's temp directory, so they skip on CI (no ffmpeg installed) and under WSL driving a Windows ffmpeg (which cannot write to the Linux temp path). Everything else runs everywhere.
+- **One test needs a working ffmpeg and skips without one.** `test_media_probe.py::test_reads_real_duration_and_rate` asks ffmpeg to write a real fixture clip into pytest's temp directory, so it skips on CI (no ffmpeg installed) and under WSL driving a Windows ffmpeg (which cannot write to the Linux temp path). The other 316 tests run everywhere.
 
 ---
 
