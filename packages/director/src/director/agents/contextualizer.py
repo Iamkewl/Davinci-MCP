@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from ..errors import ProviderError
 from ..ingestion.audio_analyzer import TrackAnalysis, analyze_track
-from ..ingestion.gemini_client import GeminiClient, GeminiError
+from ..ingestion.gemini_client import GeminiClient
 from ..ingestion.media_probe import MediaInfo, probe_media
 from ..schemas import PerClipMap
 from ..settings import DirectorSettings
@@ -82,7 +83,7 @@ class Contextualizer(Agent[ContextResult]):
                     "visual summary. Respond with valid JSON conforming to the schema."
                 ),
             )
-        except GeminiError as exc:
+        except ProviderError as exc:
             await _log_warn(f"vision analyze failed for {path}: {exc}")
             return _from_probe(clip_id, path, probe)
         try:

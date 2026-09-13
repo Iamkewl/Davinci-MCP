@@ -22,13 +22,14 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from ..errors import ProviderError
 from ..schemas import PerClipMap
 from ..settings import DirectorSettings
 
 T = TypeVar("T", bound=BaseModel)
 
 
-class GeminiError(RuntimeError):
+class GeminiError(ProviderError):
     """Raised when the Gemini call fails in some non-recoverable way."""
 
 

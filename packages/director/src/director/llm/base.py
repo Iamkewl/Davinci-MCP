@@ -9,8 +9,9 @@ provider SDK. Two adapters implement it today:
   OpenAI-compatible chat-completions endpoint (OpenRouter, vLLM, …).
 
 Error types are deliberately NOT part of the protocol: each adapter surfaces
-its own transport errors (``GeminiError`` / :class:`LLMError`) and both are
-caught next to :class:`director.agents.base.InvalidModelOutput` by callers.
+its own transport errors (``GeminiError`` / :class:`LLMError`). Both derive from
+:class:`director.errors.ProviderError`, which is what the agents catch, so a new
+adapter's failures cannot silently escape as raw SDK exceptions.
 """
 
 from __future__ import annotations
@@ -19,12 +20,13 @@ from typing import Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
+from ..errors import ProviderError
 from ..schemas import PerClipMap
 
 T = TypeVar("T", bound=BaseModel)
 
 
-class LLMError(RuntimeError):
+class LLMError(ProviderError):
     """Raised when an LLM provider call fails in some non-recoverable way."""
 
 

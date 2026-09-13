@@ -38,6 +38,28 @@ logger = logging.getLogger(__name__)
 _MAX_KEYFRAMES = 8
 
 
+def _reraise_transport(exc: Exception, base_url: str | None) -> None:
+    """Turn a reach-the-provider failure into an actionable ``LLMError``.
+
+    Anything else is returned to the caller to handle (a genuine rejection of
+    the request body, which is worth one retry with a looser response_format).
+    """
+    name = type(exc).__name__
+    hints = {
+        "APIConnectionError": f"cannot reach the endpoint at {base_url!r}",
+        "APITimeoutError": f"the endpoint at {base_url!r} timed out",
+        "AuthenticationError": "the API key was rejected",
+        "PermissionDeniedError": "the API key is not allowed to use this model",
+        "RateLimitError": "the provider is rate-limiting this key",
+        "NotFoundError": "the model id does not exist on this endpoint",
+        "InternalServerError": "the provider returned a server error",
+    }
+    hint = hints.get(name)
+    if hint is None:
+        return
+    raise LLMError(f"{hint} ({name}: {exc})") from exc
+
+
 class OpenAICompatClient:
     """Any OpenAI-compatible /chat/completions endpoint, OpenRouter by default."""
 
@@ -99,13 +121,29 @@ class OpenAICompatClient:
                 }},
             )
         except Exception as exc:
+            # Only a *provider rejection* justifies the json_object retry. A
+            # connection, auth or rate-limit failure would fail identically, and
+            # raising it as itself (an SDK exception) escaped the agents, which
+            # only knew about LLMError -- a traceback where every other provider
+            # problem is a one-line report.
+            _reraise_transport(exc, self._settings.llm_base_url)
             logger.debug("json_schema response_format rejected; falling back: %s", exc)
             instruction = (
                 f"{user}\n\nRespond with ONLY a JSON object conforming to the "
                 f"{response_schema.__name__} schema. No prose."
             )
             messages[1] = {"role": "user", "content": instruction}
-            content = await self._complete(client, model, messages, {"type": "json_object"})
+            try:
+                content = await self._complete(client, model, messages, {"type": "json_object"})
+            except LLMError:
+                raise
+            except Exception as retry_exc:
+                _reraise_transport(retry_exc, self._settings.llm_base_url)
+                msg = (
+                    f"{type(retry_exc).__name__}: {retry_exc} (the json_schema attempt "
+                    f"first failed with {type(exc).__name__}: {exc})"
+                )
+                raise LLMError(msg) from retry_exc
         return await self._validate_with_repair(
             client, model, messages, content, response_schema,
         )

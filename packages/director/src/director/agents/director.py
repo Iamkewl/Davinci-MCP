@@ -29,7 +29,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
-from ..ingestion.gemini_client import GeminiClient, GeminiError
+from ..errors import ProviderError
+from ..ingestion.gemini_client import GeminiClient
 from ..schemas import (
     DirectorAxisScore,
     DirectorEvaluation,
@@ -118,7 +119,7 @@ class Director(Agent[DirectorOutcome]):
                     user=_build_user(plan, user_prompt, ctx),
                     response_schema=DirectorEvaluation,
                 )
-            except (GeminiError, ValidationError) as err:
+            except (ProviderError, ValidationError) as err:
                 raise InvalidModelOutput(str(err)) from err
             evaluation = _enforce_validation(evaluation, ctx)
         return DirectorOutcome(evaluation=evaluation)
