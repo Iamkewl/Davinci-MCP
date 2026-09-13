@@ -564,3 +564,74 @@ def test_calls_only_documented_api(
 
     undocumented = sorted(set(log.methods_called()) - DOCUMENTED_API)
     assert not undocumented, f"backend called undocumented Resolve API: {undocumented}"
+
+
+def test_a_wrong_length_from_resolve_fails_loudly_and_leaves_nothing_behind(
+    backend: DaVinciResolveBackend,
+    resolve: tuple[FakeResolveApp, CallLog],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blackmagic's docs never say whether clipInfo's ``endFrame`` is inclusive.
+
+    We assume exclusive. If a build disagrees, every clip is one frame too long
+    and shots that tile perfectly start colliding several appends later — so the
+    backend checks the length Resolve actually built and reports the mismatch
+    with both numbers, instead of leaving a wrong clip on the timeline.
+    """
+    fake, _ = resolve
+    clip_a, _ = _seed(backend)
+    from .fake_resolve import MediaPool
+
+    real_append = MediaPool.AppendToTimeline
+
+    def one_frame_long(self: Any, clipInfos: list[dict[str, Any]]) -> list[Any]:
+        stretched = [{**info, "endFrame": int(info["endFrame"]) + 1} for info in clipInfos]
+        return real_append(self, stretched)
+
+    monkeypatch.setattr(MediaPool, "AppendToTimeline", one_frame_long)
+
+    with pytest.raises(Exception, match="INCLUSIVE") as caught:
+        backend.append_clip(clip_a, 1, start_seconds=0.0, duration_seconds=2.0)
+    assert "49-frame item for a 48-frame request" in str(caught.value)
+    assert fake.items_on("video", 1) == []
+
+
+def test_render_status_survives_a_different_key_casing(
+    backend: DaVinciResolveBackend,
+    resolve: tuple[FakeResolveApp, CallLog],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reference documents GetRenderJobStatus by example only. If a build
+    spells the keys differently, defaulting would report a finished render as
+    queued for ever — the worst kind of wrong answer for a long operation."""
+    from .fake_resolve import Project
+
+    clip_a, _ = _seed(backend)
+    backend.append_clip(clip_a, 1, 0.0, 2.0)
+    job = backend.add_render_job("main", "mp4", "/tmp/out/reel.mp4")
+    backend.start_render(job.id)
+
+    monkeypatch.setattr(
+        Project,
+        "GetRenderJobStatus",
+        lambda self, jid: {"jobStatus": "Complete", "completion percentage": 100},
+    )
+    status = backend.get_render_status(job.id)
+    assert status.status == RenderJobStatus.COMPLETED
+    assert status.progress == pytest.approx(1.0)
+
+
+def test_render_status_without_any_status_field_is_an_error(
+    backend: DaVinciResolveBackend,
+    resolve: tuple[FakeResolveApp, CallLog],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from .fake_resolve import Project
+
+    clip_a, _ = _seed(backend)
+    backend.append_clip(clip_a, 1, 0.0, 2.0)
+    job = backend.add_render_job("main", "mp4", "/tmp/out/reel.mp4")
+
+    monkeypatch.setattr(Project, "GetRenderJobStatus", lambda self, jid: {"Unexpected": 1})
+    with pytest.raises(Exception, match="no status field"):
+        backend.get_render_status(job.id)

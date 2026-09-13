@@ -112,6 +112,24 @@ _RENDER_FORMAT_HINTS: dict[RenderJobFormat, tuple[tuple[str, ...], str]] = {
 }
 
 
+def _dict_get_ci(payload: dict[str, Any], *names: str) -> Any | None:
+    """Look a key up ignoring case, spaces and underscores.
+
+    Resolve's render-status and job-list dictionaries are documented by example
+    only, so the exact spelling (``JobStatus`` vs ``jobStatus`` vs ``Job Status``)
+    is not something we can rely on. Names are tried in order.
+    """
+    normalized = {
+        "".join(ch for ch in str(key).lower() if ch.isalnum()): value
+        for key, value in payload.items()
+    }
+    for name in names:
+        value = normalized.get(name)
+        if value is not None:
+            return value
+    return None
+
+
 def _default_modules_dir() -> str | None:
     """Per-OS default ``.../Developer/Scripting/Modules`` dir (reference doc section 1)."""
     system = platform.system()
@@ -745,12 +763,48 @@ class DaVinciResolveBackend:
         pool_item = self._lookup_pool_item(mp, media_clip_id)
         media_type = 1 if timeline_track_index <= nvideo else 2
         intra_track = timeline_track_index if media_type == 1 else timeline_track_index - nvideo
-        info = self._build_clip_info(tl, pool_item, media_type, intra_track, start_seconds, duration_seconds, source_in_seconds)
+        info, span_frames = self._build_clip_info(
+            tl, pool_item, media_type, intra_track, start_seconds, duration_seconds, source_in_seconds
+        )
         items = mp.AppendToTimeline([info])
         if not items:
             raise InvalidStateError("AppendToTimeline returned no items (overlapping placement or invalid range?)")
+        self._verify_appended_length(tl, items[0], span_frames)
         after = self._hydrate_timeline_state(tl)
         return self._delta(before, after, f"timelines.{tl.GetName()}.tracks[{timeline_track_index}].items")
+
+    def _verify_appended_length(self, tl: Any, item: Any, span_frames: int) -> None:
+        """Fail loudly if Resolve built a different length than we asked for.
+
+        Blackmagic's documentation gives ``clipInfo``'s ``startFrame``/``endFrame``
+        without saying whether ``endFrame`` is inclusive; we treat it as
+        exclusive (length = end - start), which matches how the same pair reads
+        back through ``GetSourceStartFrame``/``GetSourceEndFrame`` in
+        :meth:`_move_clip_internal`. If a Resolve build disagrees, every clip is
+        one frame long and shots that tile perfectly start colliding several
+        appends later. Checking here turns that into one precise error, naming
+        the numbers, instead of a confusing cascade -- and the wrongly-sized item
+        is removed so the timeline is not left half-edited.
+        """
+        try:
+            actual = int(item.GetDuration())
+        except Exception:
+            return
+        if actual == span_frames:
+            return
+        with contextlib.suppress(Exception):
+            tl.DeleteClips([item], False)
+        hint = (
+            " (this Resolve build appears to treat clipInfo endFrame as INCLUSIVE; "
+            "resolve_mcp assumes exclusive)"
+            if actual == span_frames + 1
+            else ""
+        )
+        msg = (
+            f"Resolve created a {actual}-frame item for a {span_frames}-frame request{hint}. "
+            "The item was removed again; no partial edit was left behind."
+        )
+        raise InvalidStateError(msg)
 
     def _build_clip_info(
         self,
@@ -761,9 +815,10 @@ class DaVinciResolveBackend:
         start_seconds: float,
         duration_seconds: float,
         source_in_seconds: float,
-    ) -> dict[str, Any]:
-        """Assemble one ``AppendToTimeline`` clipInfo dict; raises if the
-        requested source range would exceed the media's own known duration.
+    ) -> tuple[dict[str, Any], int]:
+        """Assemble one ``AppendToTimeline`` clipInfo dict plus the timeline
+        span (in frames) it should produce; raises if the requested source range
+        would exceed the media's own known duration.
         """
         media_fps = self._media_fps(pool_item)
         src_conv = TimeConverter(FrameRate(fps=media_fps, drop_frame=False)) if media_fps else self._converter_of(tl)
@@ -789,7 +844,7 @@ class DaVinciResolveBackend:
             )
             raise InvalidStateError(msg)
         record_frame = self._start_frame(tl) + start_offset
-        return {
+        info = {
             "mediaPoolItem": pool_item,
             "startFrame": start_frame_src,
             "endFrame": end_frame_src,
@@ -797,6 +852,7 @@ class DaVinciResolveBackend:
             "trackIndex": intra_track,
             "recordFrame": record_frame,
         }
+        return info, span_frames
 
     def insert_clip(
         self,
@@ -1221,7 +1277,13 @@ class DaVinciResolveBackend:
         ``Project.StartRendering(job_id)`` (single-job-id call form).
         """
         proj = self._require_project()
-        known = {str(j.get("JobId")) for j in (proj.GetRenderJobList() or []) if isinstance(j, dict)}
+        known = {
+            str(value)
+            for j in (proj.GetRenderJobList() or [])
+            if isinstance(j, dict)
+            for value in [_dict_get_ci(j, "jobid")]
+            if value is not None
+        }
         if job_id not in known:
             raise NotFoundError(f"render job {job_id!r} not found")
         if not proj.StartRendering(job_id):
@@ -1234,6 +1296,11 @@ class DaVinciResolveBackend:
     def get_render_status(self, job_id: str) -> RenderJob:
         """``Project.GetRenderJobStatus(job_id)`` -> ``{'JobStatus':
         'Ready'|'Rendering'|'Complete'|'Failed'|'Cancelled', 'CompletionPercentage': 0-100}``.
+
+        The reference does not pin the key casing, and defaulting a missing key
+        would report a finished render as ``queued`` for ever — a silent wrong
+        answer. Keys are matched case-insensitively, and a payload with no
+        status-like key at all raises with the keys it did contain.
         """
         proj = self._require_project()
         try:
@@ -1242,9 +1309,16 @@ class DaVinciResolveBackend:
             raise NotFoundError(f"render job {job_id!r} not found: {exc}") from exc
         if not isinstance(info, dict) or not info:
             raise NotFoundError(f"render job {job_id!r} not found")
-        status_text = str(info.get("JobStatus", "Ready"))
+        raw_status = _dict_get_ci(info, "jobstatus", "status")
+        if raw_status is None:
+            msg = (
+                f"GetRenderJobStatus({job_id!r}) returned no status field; "
+                f"keys were {sorted(map(str, info))}"
+            )
+            raise InvalidStateError(msg)
+        status_text = str(raw_status)
         try:
-            progress = float(info.get("CompletionPercentage", 0.0)) / 100.0
+            progress = float(_dict_get_ci(info, "completionpercentage", "percentage") or 0.0) / 100.0
         except (TypeError, ValueError):
             progress = 0.0
         status_enum = _RENDER_STATUS_MAP.get(status_text.lower(), RenderJobStatus.QUEUED)
