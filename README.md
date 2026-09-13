@@ -256,7 +256,7 @@ Open problems in *this* implementation, as opposed to the platform limits above.
 - **stdio is the only transport.** `RESOLVE_MCP_TRANSPORT` accepts nothing else yet.
 - **Render presets are a fixed set.** `mp4`, `mov`, `prores` and `dnxhr` map to format/codec hints that are matched against what your Resolve build actually offers; anything else needs a new entry in `_RENDER_FORMAT_HINTS`.
 - **`insert_clip` refuses to split a clip.** Inserting in the middle of an existing item is rejected rather than silently overlapping it; cut the item first.
-- **One test skips without a usable ffmpeg temp dir.** `test_media_probe.py` needs ffmpeg to write a fixture into pytest's temp directory; under WSL against a Windows ffmpeg that write fails, so the test skips instead of failing. Everything else runs everywhere.
+- **Two `test_media_probe.py` cases need a working ffmpeg and skip without one.** They ask ffmpeg to write a real fixture clip into pytest's temp directory, so they skip on CI (no ffmpeg installed) and under WSL driving a Windows ffmpeg (which cannot write to the Linux temp path). Everything else runs everywhere.
 
 ---
 
@@ -269,6 +269,8 @@ Davinci-MCP/
 │   └── director/        # Layer 2 — orchestrator (google-genai, openai, librosa, typer, …)
 ├── .env.example
 ├── AGENTS.md            # working notes for AI agents in this repo
+├── docs/
+│   └── resolve-scripting-api.md   # the sourced API notes the live backend was written from
 ├── LICENSE              # MIT
 ├── DECISIONS.md         # the "why" behind the key design choices
 ├── plan.md              # remediation roadmap and its status
@@ -287,7 +289,7 @@ uv run pytest                                                # full suite, no Re
 
 The scoped mypy path is the canonical one — `mypy .` also walks the test tree, which is intentionally not strict-typed. CI runs exactly these three commands.
 
-Tests run entirely against the fake backend plus a harness modelled on Blackmagic's documented scripting API, so CI never needs DaVinci Resolve or an API key.
+Tests run entirely against the fake backend plus a harness modelled on Blackmagic's documented scripting API, so CI never needs DaVinci Resolve or an API key. That documentation is checked in as [docs/resolve-scripting-api.md](docs/resolve-scripting-api.md) — every scripting method the live backend calls appears there with its sources, and `test_calls_only_documented_api` fails the build if the backend calls anything outside it.
 
 ---
 

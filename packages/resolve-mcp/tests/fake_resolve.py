@@ -1,7 +1,7 @@
 """Offline stand-in for DaVinci Resolve's scripting API.
 
 This harness is written FROM Blackmagic's documented scripting API (see
-``scratchpad/resolve-api-audit/resolve_api_reference.md`` for the sourced
+``docs/resolve-scripting-api.md`` for the sourced
 method inventory), deliberately NOT from what ``davinci_backend.py`` happens to
 call. The previous harness was written the other way round and therefore
 happily modelled ``TimelineItem.Delete()``, a method Resolve does not have —

@@ -33,7 +33,7 @@ from resolve_mcp.schemas import CompositeMode, MarkerColor, MediaKind, RenderJob
 from .fake_resolve import COMPOSITE_CONSTANTS, CallLog, FakeResolveApp, install_fake_resolve
 
 # Methods the backend is allowed to call, derived from the scripting API reference
-# in scratchpad/resolve-api-audit/resolve_api_reference.md. Anything outside this
+# in docs/resolve-scripting-api.md. Anything outside this
 # set is either invented or undocumented — both are bugs.
 DOCUMENTED_API: frozenset[str] = frozenset(
     {

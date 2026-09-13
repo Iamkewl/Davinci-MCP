@@ -2,7 +2,7 @@
 
 Every call in this module uses ONLY the documented Resolve scripting surface
 (Blackmagic's "DaVinci Resolve Scripting API" README, v18+, as re-verified in
-``scratchpad/resolve-api-audit/resolve_api_reference.md``). Anything without a
+``docs/resolve-scripting-api.md``). Anything without a
 documented entry point raises :class:`~resolve_mcp.backend.UnsupportedOperationError`
 instead of fabricating success -- see :meth:`DaVinciResolveBackend.add_fade`,
 :meth:`~DaVinciResolveBackend.set_speed`, :meth:`~DaVinciResolveBackend.add_transition`,

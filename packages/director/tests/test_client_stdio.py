@@ -59,9 +59,17 @@ class TestDavinciBackendAcceptance:
         assert "fake" in src and "davinci" in src
 
     def test_auto_backend_help_mentions_davinci(self) -> None:
+        """Typer renders help through Rich, which wraps to the terminal width and
+        will hyphen-break an option name on a narrow one — CI defaults to 80
+        columns and this passed only on wide local terminals. Ask for a wide
+        terminal and compare against text with the ANSI codes stripped."""
+        import re
+
         from director.cli import app
         from typer.testing import CliRunner
 
-        result = CliRunner().invoke(app, ["auto", "--help"])
+        result = CliRunner().invoke(app, ["auto", "--help"], env={"COLUMNS": "200"})
         assert result.exit_code == 0
-        assert "--backend" in result.output
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--backend" in plain
+        assert "davinci" in plain
