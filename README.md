@@ -76,6 +76,12 @@ Every run is recorded to a **SQLite + JSONL run store** so you can inspect exact
 - **An API key** — for vision + LLM planning (Gemini by default, or any OpenAI-compatible endpoint). Not needed in `--fast`/offline mode.
 - **FFmpeg** (`ffprobe`) on your PATH — used to read clip durations and frame rates. Without it, lengths are unknown and the planner is more conservative.
 
+> **Run it on the machine Resolve runs on.** Resolve's scripting bridge is a local, in-process
+> library with no network transport, so `resolve-mcp` — and therefore `director`, which launches it
+> as a subprocess — must run under an interpreter on the same OS install as Resolve. On Windows that
+> means native Windows Python: a WSL interpreter cannot reach a Windows Resolve. The `fake` backend
+> has no such constraint.
+
 > You can try everything below **without** Resolve and **without** an API key using the `fake` backend and `--fast` mode.
 
 ---
@@ -223,6 +229,8 @@ Resolve's Python module lives inside the Resolve install. The server adds the st
 
 Then: **Resolve → Preferences → General → External scripting using = Local**, and keep Resolve Studio running. The server connects lazily, so starting Resolve after the server is fine.
 
+If Resolve isn't reachable, the server still boots and every tool call returns that checklist instead of a traceback — start Resolve and retry, no restart needed.
+
 ---
 
 ## Limitations
@@ -235,6 +243,20 @@ Honest about what the platform allows:
 - **`restart_app` is fake-only.** Resolve can quit itself but cannot relaunch itself.
 - **The live path is documentation-verified, not yet hardware-verified.** Every live call is checked against Blackmagic's documented API by an offline harness modelled from that documentation, and the test suite fails if the backend calls anything outside it — but a manual smoke test on real Resolve Studio hardware is still pending. See `plan.md`.
 - **Vision quality depends on the provider.** Gemini analyses the video file itself; OpenAI-compatible endpoints get sampled keyframes.
+
+---
+
+## Known issues
+
+Open problems in *this* implementation, as opposed to the platform limits above. Nothing here is hidden by a passing test.
+
+- **No hardware smoke test yet.** One detail of Blackmagic's reference is genuinely ambiguous and only real Resolve can settle it: whether `TimelineItem.AddMarker`'s frame is relative to the item or to the timeline. Reads and writes use the same convention, so a mismatch would show up as a marker in the wrong place rather than an error. Two other ambiguities used to sit here and now report themselves instead: `append_clip` reads the created item's length back (so an inclusive `clipInfo.endFrame` fails with both frame counts instead of quietly making every clip one frame long), and `GetRenderJobStatus` matches its keys case-insensitively and raises if there is no status field at all — defaulting would have reported a finished render as `queued` forever.
+- **The two layers are not as isolated as the diagram suggests.** `director/mcp_client/client.py` imports `resolve_mcp` internals for its in-process stub path, and director's tests use `FakeResolveBackend` directly — yet `packages/director/pyproject.toml` does not declare `resolve-mcp` as a dependency. It only works because the uv workspace installs both. Installing `director` on its own would break the stub path.
+- **Offline interactive mode understands a fixed vocabulary.** Without an LLM the REPL parses fade / opacity / speed / zoom / rotate / marker / move / delete instructions and says plainly when it doesn't understand something. It will not improvise, which is deliberate — but it does mean "make it feel dreamier" needs a provider configured.
+- **stdio is the only transport.** `RESOLVE_MCP_TRANSPORT` accepts nothing else yet.
+- **Render presets are a fixed set.** `mp4`, `mov`, `prores` and `dnxhr` map to format/codec hints that are matched against what your Resolve build actually offers; anything else needs a new entry in `_RENDER_FORMAT_HINTS`.
+- **`insert_clip` refuses to split a clip.** Inserting in the middle of an existing item is rejected rather than silently overlapping it; cut the item first.
+- **One test skips without a usable ffmpeg temp dir.** `test_media_probe.py` needs ffmpeg to write a fixture into pytest's temp directory; under WSL against a Windows ffmpeg that write fails, so the test skips instead of failing. Everything else runs everywhere.
 
 ---
 

@@ -70,6 +70,30 @@ the start plus the duration. Rounding independently can push a shot one frame in
 one, so two shots that tile perfectly in seconds collide on the frame grid — which Resolve
 then refuses.
 
+## Where the documentation is ambiguous, fail loudly with the numbers
+
+**Why:** Blackmagic documents `AppendToTimeline`'s `clipInfo` as
+`{"mediaPoolItem", "startFrame", "endFrame", …}` without saying whether
+`endFrame` is inclusive, and no public mirror of the reference settles it. We
+treat it as exclusive (length = `end - start`), which is also self-consistent
+with the way `GetSourceStartFrame`/`GetSourceEndFrame` are read back when
+`move_clip` recreates an item — that round-trip preserves length under either
+convention.
+
+If a Resolve build disagrees, every clip would be one frame longer than planned
+and shots that tile perfectly would start colliding several appends later, which
+is a miserable thing to debug. So `append_clip` reads the created item's
+duration back and, on a mismatch, deletes it again and raises with both frame
+counts and the likely cause. A wrong guess costs one clear error message, not a
+corrupted timeline — and the manual smoke test on real hardware will settle it
+in one line.
+
+The same rule applies to `GetRenderJobStatus`, which the reference documents by
+example only: keys are matched case-insensitively (`JobStatus` / `jobStatus` /
+`Job Status` all work) and a payload with no status-like key raises instead of
+defaulting, because defaulting would report a finished render as `queued`
+for ever.
+
 ## Tool surface: per-operation, type-hinted, self-describing
 
 **Why:** the prior build's `timeline(action="append_clip", ...)` dispatch tool caused LLMs to
@@ -106,6 +130,23 @@ checks argument names/types/units, 1-based track indexes, source ranges against 
 durations, dangling `<item:N>` references, tools this backend lacks, and overlapping shots.
 The same `VERB_SPECS` table generates the prompt text that tells a model what the arguments
 are, so the validator and the documentation cannot drift apart.
+
+Interactive mode goes through the same gate. It used to be the exception — a
+delta plan from `Planner.interpret` was scored but never validated, so a model
+that drifted on an argument name (`item_id`/`level` instead of
+`timeline_item_id`/`opacity`) got an APPROVED verdict and a raw failure at the
+Resolve boundary. The session now validates every delta plan and, because it
+holds the live timeline, additionally rejects item ids that are not on it.
+
+## The reviewer scores the length the music allows
+
+**Why:** "make me a 30s reel" over a 10-second track is a brief the planner
+cannot satisfy, and it never tries: it caps the cut at the music's length.
+Scoring that (correct) 10s cut against a 30s target scored coverage at 0.33 and
+prompt fidelity at 0.0, burned the whole iteration budget demanding a fix that
+is structurally impossible, and shipped a good plan labelled deficient. Both
+sides now compute the target the same way (`planner.effective_target_duration`),
+and the run reports that the request was capped rather than silently failing it.
 
 ## The reviewer scores geometry, not vibes
 

@@ -65,7 +65,7 @@ Tasks:
 - [x] Re-model `tests/fake_resolve.py` to expose ONLY the documented surface above (names/signatures/return shapes); update `davinci_backend.py` until live-backend tests pass against the re-modeled harness. The harness now mirrors Blackmagic's README, breaking circularity.
 - [x] Unify divergent semantics between backends or document them at the tool level: `insert_clip` (decide: implement record-frame placement via `recordFrame`, no silent shift), `import_media` bin support (AddSubFolder + ImportMedia into that folder), `delete_timeline` (real deletion), `restart_app` (explicit "quit only" rename of description), `create_bin` (verify success, don't suppress-and-return).
 - [x] `list_projects` uses `GetProjectListInCurrentFolder()`-equivalent documented method instead of only-current-project.
-- [ ] Manual smoke checklist (needs real Resolve Studio — owner runs): create project/timeline, import 2 clips, append/move/marker, queue+start render, and confirm the two doc-ambiguous details (TimelineItem marker frames are item-relative; GetRenderJobStatus key casing). Record results in DECISIONS.md. The offline suite cannot cover this.
+- [ ] Manual smoke checklist (needs real Resolve Studio — owner runs): create project/timeline, import 2 clips, append/move/marker, queue+start render, and confirm the one remaining doc-ambiguous detail: that TimelineItem marker frames are item-relative (read and write use the same convention, so a mismatch shows as a marker in the wrong place, not as an error). The other two are now self-detecting: GetRenderJobStatus keys are matched case-insensitively and a payload with no status field raises, and append_clip reads the created item's length back, so an inclusive clipInfo endFrame reports itself with both frame counts instead of corrupting the cut. Record results in DECISIONS.md. The offline suite cannot cover this.
 
 ## Phase 4 — CLI wiring + stdio honesty (high bugs #6/#8)
 
@@ -164,8 +164,41 @@ Phase 6 lands last so docs describe finished reality.
   generated media through the actual CLI: auto (with and without music), davinci-without-
   Resolve, no-key, interactive, resume, run list/show.
 
+  **Windows-native verification (2026-09-12).** Everything above was exercised under WSL,
+  but Resolve's scripting bridge is an in-process library with no network transport, so the
+  server has to run on the Windows install that runs Resolve. Both packages were installed
+  into a native Windows CPython 3.12 venv and re-verified there: the bootstrap resolves the
+  documented `%PROGRAMDATA%\...\Scripting\Modules` path and survives its absence; the
+  server boots on both backends over the real stdio transport; stdout carries JSON-RPC
+  frames only (structlog on stderr) under the Windows interpreter too; with Resolve absent
+  the davinci backend registers 24 tools, returns the actionable checklist per call and
+  stays responsive afterwards; and all 31 advertised tools (fake backend, destructive
+  enabled) were called once each over the wire with schema-valid arguments — every one
+  reachable, every bound and enum enforced. The director CLI ran natively end to end:
+  auto with music (13/13 cuts on beats, 18 ops applied, all reviewer axes 1.0), auto
+  against davinci without Resolve (clean failure, zero ops), the no-key path, the
+  interactive REPL and resume. README now states the co-location requirement.
+
+  **Adversarial review round (2026-09-12).** An independent reviewer went through the
+  director package hunting for ways to falsify its claims, and found real ones. Fixed:
+  the interactive path never validated its delta plans (an LLM drifting on an argument
+  name got an APPROVED verdict and a raw failure at the Resolve boundary) — it now runs
+  the same `validate_plan` gate as auto mode and additionally rejects item ids that are
+  not on the live timeline; an interactive session that attempted an edit and applied
+  nothing reported `completed_with_warnings` instead of `failed`; the planner's
+  short-clip fallback applied a 0.4s floor on top of the clip's real length, planning a
+  read past the end of the footage that the validator rejected on every iteration; the
+  reviewer scored against the raw number in the brief while the planner caps the cut at
+  the music length, so a correct plan could never satisfy it; the offline interpreter
+  silently edited clip 1 for "the second clip", read "increase opacity by 20%" as "set
+  it to 20%", and let one fade direction's number leak into the other; and the validator
+  documented numeric bounds to the model (rotation ±360, zoom multiplier) that it never
+  enforced. Each fix landed with a regression test — 313 tests, still ruff- and
+  mypy-strict clean.
+
 ## Remaining
 
 1. **LICENSE** — owner's decision (see Phase 6).
 2. **Manual smoke test on real Resolve Studio hardware** — the only way to close the last
-   documentation-verified gap. Everything else is green offline.
+   documentation-verified gap. Everything else is green offline, on WSL and on native
+   Windows.

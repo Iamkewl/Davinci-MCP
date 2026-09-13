@@ -14,6 +14,7 @@ uv run pytest                         # full suite (~290 tests, no Resolve/API k
 - **Setup gotcha:** plain `uv sync` installs *only* dev tools (pytest/ruff/mypy) because the workspace-root project has no dependencies. Without `--all-packages`, neither `director` nor `resolve_mcp` is importable and every test fails. CI uses the same flags.
 - **Mypy gotcha:** `uv run mypy .` also walks `tests/`, which is deliberately not strict-typed. The scoped command above is canonical and is what CI runs.
 - **WSL gotcha (this machine):** uv venvs must live off `/mnt/c` — 9p silently drops files during wheel extraction. `~/.bashrc` exports `UV_PROJECT_ENVIRONMENT=$HOME/.venvs/davinci-mcp`; export it before any `uv` command if a fresh shell lacks it.
+- **Windows gotcha:** the offline suite runs anywhere, but anything touching `--backend davinci` must run under *native Windows* Python — Resolve's bridge is an in-process library with no network transport, so a WSL interpreter can never reach a Windows Resolve. Both packages install cleanly into a native venv (`python -m pip install -e packages/resolve-mcp -e packages/director`) if you need to reproduce that path.
 - Run in CI order: lint → typecheck → test. Single test: `uv run pytest packages/resolve-mcp/tests/test_timecode.py -k name`.
 
 ## Architecture
@@ -53,7 +54,9 @@ Key boundaries an agent must not break:
 
 - `--fast` (or `--llm none`) = deterministic planner/reviewer, no network. Any change must keep this path working: losing the API key must never break tests or the offline pipeline.
 - The deterministic planner is genuinely beat-synced: cuts are beat times, shots tile the target length, the music goes on A1. If you touch `planner.py`, keep `test_planner_beatsync.py` honest.
-- Plans go through `plan_validation.validate_plan` before execution, and `VERB_SPECS` there is also what the LLM prompt shows the model — update both by updating the table.
+- Plans go through `plan_validation.validate_plan` before execution — **both** modes: auto in `pipeline.py`, and interactive in `InteractiveSession.interpret`, which also rejects item ids that aren't on the live timeline. `VERB_SPECS` there is also what the LLM prompt shows the model, and its documented bounds (rotation ±360, zoom 0<z≤100, opacity 0..1) mirror the server's `Annotated` types — update the table and both stay in step.
+- A run that applied nothing is `failed` in interactive mode too; only a session that never attempted an edit (state/tools/help and out) is allowed to end otherwise.
+- The reviewer's target length comes from `planner.effective_target_duration`, the same function the planner builds to — never re-derive it from the prompt alone, or the reviewer will demand a cut longer than the music.
 - Verdicts (`APPROVED` / `ACCEPTED_WITH_WARNINGS` / `FAILED`) are never force-accepted; `FAILED` is a hard stop, and a structurally invalid plan can't be approved.
 - A run that applied nothing reports `failed`. Don't "soften" statuses.
 - Audio decode goes through `soundfile.read()` directly (not `librosa.load` on paths) — the audioread/aifc path breaks on newer Pythons.
