@@ -167,7 +167,16 @@ VERB_SPECS: dict[PlanOpKind, VerbSpec] = {
     ),
 }
 
-_POSITIVE_ARGS = {"duration_seconds", "speed"}
+_POSITIVE_ARGS = {"duration_seconds", "speed", "zoom_x", "zoom_y"}
+#: Inclusive bounds mirroring the server's published schema, so a plan this
+#: validator accepts is one the tool's own annotations will accept. Keep in step
+#: with resolve_mcp.server's Annotated types (ZoomArg/RotationArg/OpacityArg).
+_BOUNDED_ARGS: dict[str, tuple[float | None, float | None]] = {
+    "opacity": (0.0, 1.0),
+    "rotation": (-360.0, 360.0),
+    "zoom_x": (None, 100.0),
+    "zoom_y": (None, 100.0),
+}
 _NON_NEGATIVE_ARGS = {
     "start_seconds",
     "source_in_seconds",
@@ -277,9 +286,17 @@ def _check_args(label: str, op: PlanOp, spec: VerbSpec) -> list[str]:
     track = op.args.get("timeline_track_index", op.args.get("track_index"))
     if track is not None and (not isinstance(track, int) or isinstance(track, bool) or track < 1):
         issues.append(f"{label}: track index is 1-based, got {track!r}")
-    opacity = op.args.get("opacity")
-    if opacity is not None and (not isinstance(opacity, _NUMBER) or not 0.0 <= float(opacity) <= 1.0):
-        issues.append(f"{label}: opacity must be within 0.0..1.0, got {opacity!r}")
+    for name, (low, high) in _BOUNDED_ARGS.items():
+        value = op.args.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, _NUMBER) or isinstance(value, bool):
+            issues.append(f"{label}: {name} must be a number, got {value!r}")
+            continue
+        number = float(value)
+        if (low is not None and number < low) or (high is not None and number > high):
+            span = f"{low if low is not None else '>0'}..{high if high is not None else '∞'}"
+            issues.append(f"{label}: {name} must be within {span}, got {value!r}")
     return issues
 
 

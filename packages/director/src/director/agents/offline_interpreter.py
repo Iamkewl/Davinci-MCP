@@ -27,6 +27,28 @@ UNPARSED_SUMMARY_PREFIX = "could not interpret offline"
 _NUMBER = r"(\d+(?:\.\d+)?)"
 
 
+#: "the second clip" has to mean clip 2. Without this the ordinal fell through
+#: to the "no target named" default and silently edited clip 1.
+_ORDINALS = {
+    "first": 1, "1st": 1,
+    "second": 2, "2nd": 2,
+    "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4,
+    "fifth": 5, "5th": 5,
+    "sixth": 6, "6th": 6,
+    "seventh": 7, "7th": 7,
+    "eighth": 8, "8th": 8,
+    "ninth": 9, "9th": 9,
+    "tenth": 10, "10th": 10,
+}
+_ORDINAL_RE = re.compile(r"\b(" + "|".join(_ORDINALS) + r")\b")
+
+#: Phrasing that means "change it relative to what it is now" rather than
+#: "set it to this value". "increase opacity by 20%" must not become 0.2.
+_RELATIVE_RE = re.compile(r"\b(by|more|less|increase|decrease|reduce|raise|lower|boost|dim)\b")
+_DOWNWARD_RE = re.compile(r"\b(decrease|reduce|lower|dim|less|down|out|darker)\b")
+
+
 @dataclass(frozen=True)
 class _Item:
     """One timeline item, flattened out of the timeline state."""
@@ -36,6 +58,29 @@ class _Item:
     track_index: int
     start_seconds: float
     duration_seconds: float
+    #: current values, needed to resolve relative adjustments ("by 20%")
+    opacity: float = 1.0
+    zoom: float = 1.0
+
+
+@dataclass(frozen=True)
+class _Adjust:
+    """Either an absolute target value or a change relative to the current one."""
+
+    absolute: float | None = None
+    factor: float | None = None  # multiply the current value
+    delta: float | None = None  # add to the current value
+
+    def resolve(self, current: float, low: float, high: float) -> float:
+        if self.absolute is not None:
+            value = self.absolute
+        elif self.factor is not None:
+            value = current * self.factor
+        elif self.delta is not None:
+            value = current + self.delta
+        else:  # pragma: no cover - constructed with exactly one field set
+            value = current
+        return max(low, min(high, value))
 
 
 def interpret_offline(
@@ -100,8 +145,10 @@ def _parse(text: str, items: list[_Item]) -> tuple[list[PlanOp], str]:
         return ops, f"move {_names(targets)} to {position}s"
 
     # fades
-    fade_in = _fade_amount(text, r"fade[- ]?in|fade up")
-    fade_out = _fade_amount(text, r"fade[- ]?out|fade down|fade to black")
+    _FADE_IN = r"fade[- ]?in|fade up"
+    _FADE_OUT = r"fade[- ]?out|fade down|fade to black"
+    fade_in = _fade_amount(text, _FADE_IN, other=_FADE_OUT)
+    fade_out = _fade_amount(text, _FADE_OUT, other=_FADE_IN)
     if fade_in is not None or fade_out is not None:
         for it in targets:
             cap = max(0.0, it.duration_seconds / 2.0)
@@ -134,20 +181,26 @@ def _parse(text: str, items: list[_Item]) -> tuple[list[PlanOp], str]:
     # opacity
     opacity = _percent(text, r"opacity|transparen\w*|fade level")
     if opacity is not None:
+        values: list[float] = []
         for it in targets:
+            value = opacity.resolve(it.opacity, 0.0, 1.0)
+            values.append(value)
             ops.append(
                 _op(
                     PlanOpKind.SET_OPACITY,
-                    {"timeline_item_id": it.id, "opacity": opacity},
-                    f"set item {it.index} opacity to {opacity:.2f}",
+                    {"timeline_item_id": it.id, "opacity": value},
+                    f"set item {it.index} opacity to {value:.2f}",
                 )
             )
-        return ops, f"set opacity of {_names(targets)} to {opacity:.0%}"
+        return ops, f"set opacity of {_names(targets)} to {_amounts(values, '{:.0%}')}"
 
     # zoom / punch in
     zoom = _zoom(text)
     if zoom is not None:
+        zooms: list[float] = []
         for it in targets:
+            value = zoom.resolve(it.zoom, 0.01, 100.0)
+            zooms.append(value)
             ops.append(
                 _op(
                     PlanOpKind.SET_TRANSFORM,
@@ -155,14 +208,14 @@ def _parse(text: str, items: list[_Item]) -> tuple[list[PlanOp], str]:
                         "timeline_item_id": it.id,
                         "pan_x": 0.0,
                         "pan_y": 0.0,
-                        "zoom_x": zoom,
-                        "zoom_y": zoom,
+                        "zoom_x": value,
+                        "zoom_y": value,
                         "rotation": 0.0,
                     },
-                    f"zoom item {it.index} to {zoom:.2f}x",
+                    f"zoom item {it.index} to {value:.2f}x",
                 )
             )
-        return ops, f"zoom {_names(targets)} to {zoom:.2f}x"
+        return ops, f"zoom {_names(targets)} to {_amounts(zooms, '{:.2f}x')}"
 
     # rotate
     # "rotate clip 2 by -15": the clip number must not be read as the angle.
@@ -259,6 +312,8 @@ def _flatten_items(timeline_state: dict[str, Any]) -> list[_Item]:
         raw = video_only
     raw.sort(key=lambda pair: (float(pair[1].get("start_seconds") or 0.0), pair[0]))
     for position, (track_index, item) in enumerate(raw, start=1):
+        transform = item.get("transform")
+        zoom = transform.get("zoom_x") if isinstance(transform, dict) else None
         flat.append(
             _Item(
                 id=str(item["id"]),
@@ -266,9 +321,15 @@ def _flatten_items(timeline_state: dict[str, Any]) -> list[_Item]:
                 track_index=track_index,
                 start_seconds=float(item.get("start_seconds") or 0.0),
                 duration_seconds=float(item.get("duration_seconds") or 0.0),
+                opacity=_as_float(item.get("opacity"), 1.0),
+                zoom=_as_float(zoom, 1.0),
             )
         )
     return flat
+
+
+def _as_float(value: Any, default: float) -> float:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else default
 
 
 def _targets(text: str, items: list[_Item]) -> list[_Item]:
@@ -277,13 +338,26 @@ def _targets(text: str, items: list[_Item]) -> list[_Item]:
         return items
     if re.search(r"\blast\b", text):
         return items[-1:]
-    if re.search(r"\bfirst\b", text):
-        return items[:1]
     numbered = re.search(r"\b(?:clip|item|shot)\s*#?\s*(\d+)", text)
     if numbered:
         wanted = int(numbered.group(1))
         return [it for it in items if it.index == wanted] or items[:1]
+    ordinal = _ORDINAL_RE.search(text)
+    if ordinal:
+        wanted = _ORDINALS[ordinal.group(1)]
+        return [it for it in items if it.index == wanted] or items[:1]
     return items[:1]
+
+
+def _amounts(values: list[float], fmt: str) -> str:
+    """One value when every item ended up the same, otherwise a range — a
+    relative adjustment lands differently on items that started differently."""
+    if not values:
+        return "nothing"
+    low, high = min(values), max(values)
+    if abs(high - low) < 1e-9:
+        return fmt.format(low)
+    return f"{fmt.format(low)}..{fmt.format(high)}"
 
 
 def _names(items: list[_Item]) -> str:
@@ -294,11 +368,23 @@ def _names(items: list[_Item]) -> str:
     return f"{len(items)} clips"
 
 
-def _fade_amount(text: str, pattern: str) -> float | None:
-    match = re.search(rf"(?:{pattern})[^\d]*{_NUMBER}\s*(?:s|sec|secs|seconds)?", text)
-    if match:
-        return float(match.group(1))
-    return 0.5 if re.search(pattern, text) else None
+def _fade_amount(text: str, pattern: str, *, other: str) -> float | None:
+    """Seconds for one fade direction, or 0.5 when the direction is named
+    without a number, or None when it isn't mentioned at all.
+
+    The number search is bounded by the *other* direction's keyword: in
+    "fade in then fade out 2s" the 2 belongs to the out-fade only, and an
+    unbounded skip would hand it to both.
+    """
+    found = re.search(pattern, text)
+    if not found:
+        return None
+    rest = text[found.end():]
+    boundary = re.search(other, rest)
+    if boundary:
+        rest = rest[: boundary.start()]
+    match = re.match(rf"[^\d]*{_NUMBER}\s*(?:s|sec|secs|seconds)?", rest)
+    return float(match.group(1)) if match else 0.5
 
 
 def _speed(text: str) -> float | None:
@@ -315,31 +401,51 @@ def _speed(text: str) -> float | None:
     return None
 
 
-def _percent(text: str, pattern: str) -> float | None:
+def _is_relative(text: str) -> bool:
+    """"increase opacity by 20%" adjusts; "set opacity to 20%" assigns.
+
+    An explicit "to"/"at" wins, because "reduce it to 20%" is an assignment
+    despite the "reduce".
+    """
+    if re.search(rf"\b(?:to|at)\s+{_NUMBER}", text):
+        return False
+    return bool(_RELATIVE_RE.search(text))
+
+
+def _percent(text: str, pattern: str) -> _Adjust | None:
     if not re.search(pattern, text):
         return None
+    relative = _is_relative(text)
     percent = re.search(rf"{_NUMBER}\s*%", text)
     if percent:
-        return max(0.0, min(1.0, float(percent.group(1)) / 100.0))
+        value = float(percent.group(1)) / 100.0
+        if relative:
+            return _Adjust(delta=-value if _DOWNWARD_RE.search(text) else value)
+        return _Adjust(absolute=value)
     fraction = re.search(rf"(?:to|at)\s+{_NUMBER}\b", text)
     if fraction:
-        value = float(fraction.group(1))
-        return max(0.0, min(1.0, value if value <= 1.0 else value / 100.0))
+        raw = float(fraction.group(1))
+        return _Adjust(absolute=raw if raw <= 1.0 else raw / 100.0)
     return None
 
 
-def _zoom(text: str) -> float | None:
+def _zoom(text: str) -> _Adjust | None:
     if not re.search(r"\bzoom|punch in|scale\b", text):
         return None
+    relative = _is_relative(text)
     percent = re.search(rf"{_NUMBER}\s*%", text)
     if percent:
-        return max(0.01, float(percent.group(1)) / 100.0)
+        value = float(percent.group(1)) / 100.0
+        if relative:
+            # "zoom in by 20%" -> 1.2x the current zoom; "out by 20%" -> 0.8x.
+            return _Adjust(factor=max(0.01, 1.0 - value if _DOWNWARD_RE.search(text) else 1.0 + value))
+        return _Adjust(absolute=max(0.01, value))
     multiplier = re.search(rf"{_NUMBER}\s*x\b", text)
     if multiplier:
-        return max(0.01, float(multiplier.group(1)))
+        return _Adjust(absolute=max(0.01, float(multiplier.group(1))))
     if re.search(r"\bzoom out\b", text):
-        return 0.9
-    return 1.2
+        return _Adjust(factor=0.9)
+    return _Adjust(factor=1.2) if relative else _Adjust(absolute=1.2)
 
 
 def _quoted(text: str) -> str | None:

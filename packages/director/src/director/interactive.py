@@ -41,6 +41,7 @@ from .agents.director import PlanContext
 from .agents.logging_setup import get_logger
 from .agents.offline_interpreter import UNPARSED_SUMMARY_PREFIX
 from .mcp_client import ResolveClient
+from .plan_validation import SYMBOLIC_ITEM_RE, validate_plan
 from .schemas import (
     DirectorVerdict,
     EventKind,
@@ -62,8 +63,51 @@ offline instructions I understand (an LLM provider unlocks free-form direction):
   set opacity of clip 1 to 60%     zoom clip 2 to 120%
   rotate clip 1 by 5               blend mode screen on clip 2
   mark clip 1 'hook' at 0.5s       move clip 3 to 12s
-  delete clip 4                    ... 'all clips' works too\
+  delete clip 4                    ... 'all clips' works too
+targets: 'clip 2', 'the second clip', 'first', 'last', 'all clips'
+amounts: 'to 60%' sets it; 'by 20%' / 'increase' / 'reduce' adjust from the
+         value the clip has now\
 """
+
+
+def _timeline_item_ids(state: dict[str, Any]) -> set[str]:
+    """Every item id in a ``get_timeline_state`` payload, tolerant of a state
+    that came back as an error message instead."""
+    if not isinstance(state, dict):
+        return set()
+    # get_timeline_state returns the TimelineState itself; current_state() wraps
+    # a failure as {"timeline": None, "message": ...}.
+    timeline = state if isinstance(state.get("tracks"), list) else state.get("timeline")
+    if not isinstance(timeline, dict):
+        return set()
+    ids: set[str] = set()
+    for track in timeline.get("tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        for item in track.get("items") or []:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                ids.add(item["id"])
+    return ids
+
+
+def _unknown_item_refs(plan: Plan, state: dict[str, Any]) -> list[str]:
+    """Delta ops must name items that are actually on the timeline.
+
+    ``validate_plan`` can only check symbolic ``<item:N>`` placeholders against
+    the plan's own appends; here we have the real timeline, so an id the model
+    invented is caught before it reaches Resolve.
+    """
+    known = _timeline_item_ids(state)
+    if not known:
+        return []  # no readable state — don't invent problems
+    issues: list[str] = []
+    for position, op in enumerate(plan.ops, start=1):
+        value = op.args.get("timeline_item_id")
+        if isinstance(value, str) and not SYMBOLIC_ITEM_RE.match(value) and value not in known:
+            issues.append(
+                f"op {position} ({op.kind.value}): timeline_item_id {value!r} is not on this timeline"
+            )
+    return issues
 
 
 @dataclass
@@ -103,6 +147,7 @@ class InteractiveSession:
         self.target_project = target_project
         self.target_timeline = target_timeline
         self._applied_any = False
+        self._attempted_any = False
         if run_id is None:
             rec = run_store.create_run(
                 mode=RunMode.INTERACTIVE,
@@ -127,13 +172,21 @@ class InteractiveSession:
         return await self._client.list_tools()
 
     def finalize(self) -> None:
-        """Close the run record so it is inspectable and resumable afterwards."""
+        """Close the run record so it is inspectable and resumable afterwards.
+
+        Same invariant as auto mode: a session that *tried* to edit and applied
+        nothing is ``failed``, never "completed". A browse-only session (state /
+        tools / help and out) attempted nothing, so it is not a failure.
+        """
         record = self._run_store.get_run(self.run_id)
         if record is None or record.status != RunStatus.RUNNING:
             return
-        status = (
-            RunStatus.COMPLETED_APPROVED if self._applied_any else RunStatus.COMPLETED_WITH_WARNINGS
-        )
+        if self._applied_any:
+            status = RunStatus.COMPLETED_APPROVED
+        elif self._attempted_any:
+            status = RunStatus.FAILED
+        else:
+            status = RunStatus.COMPLETED_WITH_WARNINGS
         self._run_store.update_run(record.model_copy(update={"status": status}))
 
     # ---- single-interpret -----------------------------------------------------
@@ -163,10 +216,23 @@ class InteractiveSession:
             )
         )
 
+        # Same gate as auto mode: a delta plan is checked before it is scored, so
+        # an LLM that drifts on argument names or invents an item id cannot get a
+        # plan approved (Director._enforce_validation refuses to approve one with
+        # structural problems) and cannot get it executed either.
+        available = frozenset(await self.tools_summary())
+        validation_issues = (
+            [*validate_plan(plan, available_tools=available), *_unknown_item_refs(plan, state)]
+            if plan.ops
+            else []
+        )
+
         director_outcome = await self._director.run(
             plan=plan,
             user_prompt=instruction,
-            context=PlanContext(available_tools=frozenset(await self.tools_summary())),
+            context=PlanContext(
+                available_tools=available, validation_issues=validation_issues
+            ),
         )
         self._run_store.record_verdict(self.run_id, plan.version, director_outcome.evaluation)
         self._event_log.append(
@@ -181,6 +247,16 @@ class InteractiveSession:
         if not plan.ops:
             note = plan.summary or "nothing to do"
             return InterpretResult(instruction, plan, None, director_outcome, False, note)
+        self._attempted_any = True
+        if validation_issues:
+            return InterpretResult(
+                instruction,
+                plan,
+                None,
+                director_outcome,
+                False,
+                "this edit would not execute: " + "; ".join(validation_issues[:4]),
+            )
         if director_outcome.evaluation.verdict == DirectorVerdict.FAILED:
             return InterpretResult(
                 instruction,

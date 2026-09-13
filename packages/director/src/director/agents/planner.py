@@ -14,7 +14,10 @@ name gets one repair attempt, then the run fails honestly rather than half
 executing.
 
 Either way the plan is checked with :func:`validate_plan`, so what leaves the
-planner is executable.
+planner is executable. :meth:`Planner.interpret` (interactive mode) returns a
+*delta* plan and is validated by its caller,
+:class:`director.interactive.InteractiveSession`, which also has the live
+timeline and so can additionally reject item ids that are not on it.
 """
 
 from __future__ import annotations
@@ -22,13 +25,15 @@ from __future__ import annotations
 import re
 import statistics
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from ..ingestion.gemini_client import GeminiClient, GeminiError
+from ..errors import ProviderError
+from ..ingestion.gemini_client import GeminiClient
 from ..plan_validation import describe_verbs, validate_plan
 from ..schemas import PerClipMap, Plan, PlanOp, PlanOpKind
 from ..settings import DirectorSettings
@@ -38,7 +43,7 @@ from .offline_interpreter import interpret_offline
 if TYPE_CHECKING:
     from ..llm.base import LLMClient
 
-__all__ = ["Planner", "PlannerRequest", "parse_target_duration"]
+__all__ = ["Planner", "PlannerRequest", "effective_target_duration", "parse_target_duration"]
 
 # Wire convention: track 1 is the first video track, track 2 the first audio track.
 VIDEO_TRACK = 1
@@ -173,7 +178,7 @@ class Planner(Agent[Plan]):
                 user=_user_prompt(request, extra_issues),
                 response_schema=Plan,
             )
-        except GeminiError as err:
+        except ProviderError as err:
             raise InvalidModelOutput(str(err)) from err
         except ValidationError as err:
             raise InvalidModelOutput(str(err)) from err
@@ -205,7 +210,7 @@ class Planner(Agent[Plan]):
                 ),
                 response_schema=Plan,
             )
-        except (GeminiError, ValidationError) as err:
+        except (ProviderError, ValidationError) as err:
             raise InvalidModelOutput(str(err)) from err
 
 
@@ -313,21 +318,36 @@ def build_deterministic_plan(req: PlannerRequest) -> Plan:
     )
 
 
-def _total_length(req: PlannerRequest) -> float:
-    """How long the finished cut should be."""
-    requested = parse_target_duration(req.user_prompt)
-    known = [c.duration_seconds for c in req.per_clip if c.duration_seconds > 0]
+def effective_target_duration(
+    user_prompt: str,
+    per_clip: Sequence[PerClipMap],
+    music_duration_seconds: float | None,
+) -> float:
+    """The length the cut can actually be — the brief, capped by the music.
+
+    The reviewer has to score against this, not against the raw number in the
+    brief: asking for "30s" over a 10s track is a request the planner can never
+    satisfy, and scoring the (correct) 10s cut against 30 makes a good plan look
+    like a 33% failure on every iteration.
+    """
+    requested = parse_target_duration(user_prompt)
+    known = [c.duration_seconds for c in per_clip if c.duration_seconds > 0]
     if requested is not None:
         total = requested
-    elif req.music_duration_seconds:
-        total = req.music_duration_seconds
+    elif music_duration_seconds:
+        total = music_duration_seconds
     elif known:
         total = min(sum(known), DEFAULT_TOTAL_SECONDS * 2)
     else:
         total = DEFAULT_TOTAL_SECONDS
-    if req.music_duration_seconds:
-        total = min(total, req.music_duration_seconds)
+    if music_duration_seconds:
+        total = min(total, music_duration_seconds)
     return _clamp_total(total)
+
+
+def _total_length(req: PlannerRequest) -> float:
+    """How long the finished cut should be."""
+    return effective_target_duration(req.user_prompt, req.per_clip, req.music_duration_seconds)
 
 
 def _segment_target(prompt: str, bpm: float | None) -> float:
@@ -428,9 +448,14 @@ def _assign_clips(
                 break
         if chosen is None:
             # Nothing is long enough: use the longest clip and shorten the shot.
+            # The clip's real length is a hard cap — applying MIN_SEGMENT_SECONDS
+            # on top of it would plan a shot that reads past the end of the
+            # footage, which the validator then rejects on every iteration.
             chosen = max(order, key=lambda c: c.duration_seconds)
             source_in = 0.0
-            duration = max(MIN_SEGMENT_SECONDS, min(segment.duration, chosen.duration_seconds))
+            duration = min(segment.duration, chosen.duration_seconds)
+            if chosen.duration_seconds > 0:
+                duration = min(max(duration, MIN_SEGMENT_SECONDS), chosen.duration_seconds)
         source_in = _prefer_key_moment(chosen, source_in, duration)
         cursors[chosen.clip_id] = source_in + duration
         out.append((segment, chosen, source_in, duration))

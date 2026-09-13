@@ -38,7 +38,7 @@ from .agents import (
     PlannerRequest,
 )
 from .agents.director import PlanContext
-from .agents.planner import parse_target_duration
+from .agents.planner import effective_target_duration, parse_target_duration
 from .ingestion.gemini_client import GeminiClient
 from .mcp_client import ResolveClient
 from .plan_validation import validate_plan
@@ -159,7 +159,25 @@ class Orchestrator:
         music_duration = ctx.music_analysis.duration_seconds if ctx.music_analysis else None
         fps = target_fps if target_fps is not None else _infer_fps(ctx.per_clip)
         tools = await self._editor.available_tools()
-        target_duration = parse_target_duration(user_prompt) or music_duration
+        requested_duration = parse_target_duration(user_prompt)
+        # Score against what is achievable, not the raw number in the brief: the
+        # planner caps the cut at the music's length, so a reviewer holding it to
+        # a longer target would fail a correct plan on every iteration.
+        target_duration = (
+            effective_target_duration(user_prompt, ctx.per_clip, music_duration)
+            if (requested_duration is not None or music_duration)
+            else None
+        )
+        capped_note: list[str] = []
+        if (
+            requested_duration is not None
+            and target_duration is not None
+            and target_duration < requested_duration - 1e-6
+        ):
+            capped_note.append(
+                f"requested {requested_duration:.0f}s but the music is only "
+                f"{music_duration:.1f}s — the cut is capped at {target_duration:.1f}s"
+            )
 
         verdict: DirectorEvaluation | None = None
         last_plan: Plan | None = None
@@ -278,7 +296,7 @@ class Orchestrator:
             edit_result=edit_result,
             plan=last_plan,
             target_timeline=timeline_name,
-            issues=issues,
+            issues=[*capped_note, *issues],
         )
 
     async def resume_run(self, *, run_id: str) -> AutoResult:

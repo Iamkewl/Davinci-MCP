@@ -159,3 +159,67 @@ def test_empty_timeline_is_explained() -> None:
     plan = _plan("fade in the first clip", {"name": "tl", "tracks": []})
     assert plan.ops == []
     assert "empty" in plan.summary
+
+
+# --- regressions: targeting and relative amounts -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("instruction", "expected_id"),
+    [
+        ("fade out the second clip", "item_1"),
+        ("delete the third clip", "item_2"),
+        ("zoom the 2nd clip to 150%", "item_1"),
+    ],
+)
+def test_ordinal_words_pick_the_right_clip(instruction: str, expected_id: str) -> None:
+    """"the second clip" used to fall through to the default and edit clip 1 —
+    a confident wrong edit, which is exactly what this module refuses to do."""
+    plan = _plan(instruction)
+    assert plan.ops, plan.summary
+    assert {op.args["timeline_item_id"] for op in plan.ops} == {expected_id}
+
+
+def test_relative_opacity_adjusts_from_the_current_value() -> None:
+    state = _state(items=1)
+    state["tracks"][0]["items"][0]["opacity"] = 0.5
+    plan = _plan("increase opacity of clip 1 by 20%", state)
+    assert _kinds(plan) == [PlanOpKind.SET_OPACITY]
+    assert plan.ops[0].args["opacity"] == pytest.approx(0.7)
+
+
+def test_reduce_opacity_by_a_percentage_goes_down_not_to() -> None:
+    state = _state(items=1)
+    state["tracks"][0]["items"][0]["opacity"] = 1.0
+    plan = _plan("reduce opacity of clip 1 by 20%", state)
+    assert plan.ops[0].args["opacity"] == pytest.approx(0.8)
+
+
+def test_absolute_opacity_still_assigns() -> None:
+    state = _state(items=1)
+    state["tracks"][0]["items"][0]["opacity"] = 1.0
+    plan = _plan("set opacity of clip 1 to 20%", state)
+    assert plan.ops[0].args["opacity"] == pytest.approx(0.2)
+
+
+def test_zoom_in_by_a_percentage_multiplies_the_current_zoom() -> None:
+    state = _state(items=1)
+    state["tracks"][0]["items"][0]["transform"] = {"zoom_x": 1.5, "zoom_y": 1.5}
+    plan = _plan("zoom in on clip 1 by 20%", state)
+    assert plan.ops[0].args["zoom_x"] == pytest.approx(1.8)
+
+
+def test_zoom_out_by_a_percentage_shrinks() -> None:
+    state = _state(items=1)
+    state["tracks"][0]["items"][0]["transform"] = {"zoom_x": 1.0, "zoom_y": 1.0}
+    plan = _plan("zoom out on clip 1 by 20%", state)
+    assert plan.ops[0].args["zoom_x"] == pytest.approx(0.8)
+
+
+def test_a_fade_number_belongs_to_its_own_direction() -> None:
+    """"fade in then fade out 2s": the 2 is the out-fade's. The unbounded skip
+    between keyword and number used to hand it to both."""
+    plan = _plan("fade in then fade out 2s on clip 1")
+    args = plan.ops[0].args
+    assert args["fade_out_seconds"] == pytest.approx(1.0)  # capped at half a 2s item
+    assert args["fade_in_seconds"] == pytest.approx(0.5)  # the default, not the 2

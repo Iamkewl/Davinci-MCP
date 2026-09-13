@@ -166,3 +166,42 @@ def test_every_verb_has_a_spec(kind: PlanOpKind) -> None:
     assert kind in VERB_SPECS
     assert VERB_SPECS[kind].tool
     assert VERB_SPECS[kind].summary
+
+
+# --- the bounds the table documents are the bounds it enforces ---------------------
+
+
+@pytest.mark.parametrize(
+    ("args", "fragment"),
+    [
+        ({"rotation": 999999.0}, "rotation must be within -360.0..360.0"),
+        ({"rotation": -400.0}, "rotation must be within -360.0..360.0"),
+        ({"zoom_x": -50.0}, "zoom_x must be a number > 0"),
+        ({"zoom_y": 0.0}, "zoom_y must be a number > 0"),
+        ({"zoom_x": 250.0}, "zoom_x must be within"),
+    ],
+)
+def test_transform_bounds_match_the_documented_units(args: dict, fragment: str) -> None:
+    """VERB_SPECS advertises "degrees -360..360" and a zoom multiplier to the
+    model; the validator has to hold the model to it, or the server's own
+    annotations reject the plan at execution time instead."""
+    plan = _plan(
+        PlanOp(
+            id="op",
+            kind=PlanOpKind.SET_TRANSFORM,
+            args={"timeline_item_id": "<item:0>", **args},
+        ),
+    )
+    assert any(fragment in issue for issue in _issues(plan)), _issues(plan)
+
+
+def test_transform_within_bounds_is_accepted() -> None:
+    plan = _plan(
+        _append(),
+        PlanOp(
+            id="op",
+            kind=PlanOpKind.SET_TRANSFORM,
+            args={"timeline_item_id": "<item:0>", "rotation": -15.0, "zoom_x": 1.2, "zoom_y": 1.2},
+        ),
+    )
+    assert _issues(plan) == []

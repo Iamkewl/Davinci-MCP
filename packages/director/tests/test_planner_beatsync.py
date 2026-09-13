@@ -228,3 +228,46 @@ def test_works_without_music_or_durations() -> None:
     total = shots[-1]["start_seconds"] + shots[-1]["duration_seconds"]
     assert total == pytest.approx(10.0, abs=0.05)
     assert validate_plan(plan, per_clip=request.per_clip) == []
+
+
+# --- regressions -------------------------------------------------------------------
+
+
+def test_clips_shorter_than_the_minimum_segment_do_not_over_read() -> None:
+    """When nothing is long enough the shot is shortened — but the floor used to
+    be applied on top of the clip's real length, planning a read past the end of
+    the footage that the validator then rejected on every iteration."""
+    req = _request(per_clip=_clips(0.3, 0.25), user_prompt="high-energy 10s reel")
+    plan = build_deterministic_plan(req)
+    assert validate_plan(
+        plan,
+        per_clip=req.per_clip,
+        available_tools=req.available_tools,
+        music_path=req.music_path,
+    ) == []
+    by_id = {clip.clip_id: clip.duration_seconds for clip in req.per_clip}
+    for op in plan.ops:
+        if op.kind != PlanOpKind.APPEND_CLIP:
+            continue
+        media = op.args["media_clip_id"]
+        if media not in by_id:
+            continue  # the music bed
+        end = float(op.args.get("source_in_seconds", 0.0)) + float(op.args["duration_seconds"])
+        assert end <= by_id[media] + 1e-6, f"{op.args} reads past a {by_id[media]}s clip"
+
+
+def test_target_length_is_capped_by_the_music() -> None:
+    """A 30s brief over a 10s track is a 10s cut — and the reviewer has to be
+    told 10, or it fails a correct plan for "only" covering a third of it."""
+    from director.agents.planner import effective_target_duration
+
+    clips = _clips(8.0, 12.0)
+    assert effective_target_duration("30s reel", clips, 10.0) == pytest.approx(10.0)
+    assert effective_target_duration("30s reel", clips, None) == pytest.approx(30.0)
+    assert effective_target_duration("30s reel", clips, 60.0) == pytest.approx(30.0)
+
+    req = _request(user_prompt="30s reel", music_duration_seconds=10.0, per_clip=clips)
+    plan = build_deterministic_plan(req)
+    video = [op for op in plan.ops if op.kind == PlanOpKind.APPEND_CLIP and op.args.get("timeline_track_index") == VIDEO_TRACK]
+    covered = max(float(op.args["start_seconds"]) + float(op.args["duration_seconds"]) for op in video)
+    assert covered == pytest.approx(effective_target_duration("30s reel", clips, 10.0), abs=0.05)
